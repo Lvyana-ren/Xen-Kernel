@@ -1,5 +1,5 @@
 
-name: Anymore Kernel - Baseline Build
+name: Anymore Vayu - Baseline Build
 
 on:
   workflow_dispatch:
@@ -13,11 +13,12 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout source
+      - name: Checkout Anymore source
         uses: actions/checkout@v4
         with:
           ref: "16"
           fetch-depth: 1
+          lfs: true
 
       - name: Install build dependencies
         run: |
@@ -25,75 +26,72 @@ jobs:
           sudo apt-get install -y \
             bc bison build-essential ccache \
             clang flex git libelf-dev libssl-dev \
-            lld lz4 make python3 rsync \
+            lld llvm make python3 rsync \
             device-tree-compiler \
             gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu \
             binutils-arm-linux-gnueabi \
-            wget xz-utils
+            libncurses-dev \
+            lz4 zip wget xz-utils
 
-      - name: Prepare toolchains
+      - name: Prepare upstream Clang
         run: |
           set -e
 
-          mkdir -p "$HOME/toolchains"
+          mkdir -p "$HOME/clang"
 
-          # Use the Clang branch specified by upstream build.sh
-          git clone --depth=1 --single-branch \
-            -b 15.0 \
+          git clone --depth=1 \
+            --single-branch \
+            --branch 15.0 \
             https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
-            "$HOME/toolchains/clang"
+            "$HOME/clang"
 
-          # GCC64 version referenced by upstream build.sh
-          wget -q \
-            https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/aarch64--glibc--stable-2026.08-1.tar.xz \
-            -O "$HOME/toolchains/gcc64.tar.xz"
+          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
 
-          mkdir -p "$HOME/toolchains/gcc64"
+          echo "=== Clang version ==="
+          "$HOME/clang/bin/clang" --version
 
-          tar -xJf "$HOME/toolchains/gcc64.tar.xz" \
-            -C "$HOME/toolchains/gcc64" \
-            --strip-components=1
-
-          echo "$HOME/toolchains/clang/bin" >> "$GITHUB_PATH"
-          echo "$HOME/toolchains/gcc64/bin" >> "$GITHUB_PATH"
-
-          echo "=== Clang ==="
-          "$HOME/toolchains/clang/bin/clang" --version
-
-          echo "=== GCC64 ==="
-          "$HOME/toolchains/gcc64/bin/aarch64-linux-gnu-gcc" --version
-
-          echo "=== GCC32 ==="
-          arm-linux-gnueabi-gcc --version
-
-      - name: Check source and configuration
+      - name: Check source and toolchains
         run: |
           set -e
 
-          test -f Makefile
-          test -f arch/arm64/Makefile
-          test -f arch/arm64/configs/vayu_defconfig
-
-          echo "=== Commit ==="
+          echo "=== Source commit ==="
           git log -1 --oneline
 
           echo "=== Kernel version ==="
           make kernelversion
 
-          echo "=== Defconfig ==="
-          test -s arch/arm64/configs/vayu_defconfig
+          echo "=== Required source files ==="
+          test -f Makefile
+          test -f arch/arm64/Makefile
+          test -f arch/arm64/configs/vayu_defconfig
 
-      - name: Generate baseline config
+          echo "=== GCC64 ==="
+          aarch64-linux-gnu-gcc --version
+
+          echo "=== GCC32 ==="
+          arm-linux-gnueabi-gcc --version
+
+          echo "=== LLVM tools ==="
+          clang --version
+          ld.lld --version
+          llvm-ar --version
+
+      - name: Generate baseline defconfig
         run: |
           set -e
 
-          make O=out ARCH=arm64 vayu_defconfig
+          export ARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
+
+          make ARCH=arm64 O=out vayu_defconfig
 
           test -s out/.config
-
           cp out/.config baseline.config
+
+          echo "=== Config generated successfully ==="
+          wc -l out/.config
 
       - name: Compile kernel
         run: |
@@ -101,10 +99,9 @@ jobs:
 
           export ARCH=arm64
           export SUBARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
           export KBUILD_BUILD_USER="GitHub-Actions"
-          export KBUILD_BUILD_HOST="Anymore-Baseline"
-
-          export PATH="$HOME/toolchains/clang/bin:$HOME/toolchains/gcc64/bin:$PATH"
+          export KBUILD_BUILD_HOST="AnymoreProject"
 
           make -j"$(nproc)" \
             O=out \
@@ -131,7 +128,7 @@ jobs:
             CC="ccache clang" \
             2>&1 | tee build.log
 
-      - name: Verify kernel output
+      - name: Verify kernel image
         if: success()
         run: |
           set -e
@@ -139,7 +136,7 @@ jobs:
           IMAGE="out/arch/arm64/boot/Image"
 
           if [ ! -s "$IMAGE" ]; then
-            echo "::error::Kernel Image was not generated."
+            echo "::error::Kernel Image not found."
             exit 1
           fi
 
@@ -147,18 +144,13 @@ jobs:
           file "$IMAGE"
           ls -lh "$IMAGE"
 
-          echo "=== Optional outputs ==="
-          for f in \
-            out/arch/arm64/boot/Image.gz \
-            out/vmlinux \
-            out/System.map
-          do
-            if [ -s "$f" ]; then
-              ls -lh "$f"
-            fi
-          done
+          echo "=== Available build outputs ==="
+          find out/arch/arm64/boot \
+            -maxdepth 2 -type f \
+            \( -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" \) \
+            -print
 
-      - name: Upload kernel build artifacts
+      - name: Upload baseline artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
@@ -167,17 +159,17 @@ jobs:
           path: |
             out/arch/arm64/boot/Image
             out/arch/arm64/boot/Image.gz
-            out/vmlinux
-            out/System.map
+            out/arch/arm64/boot/dtbo.img
+            out/arch/arm64/boot/dtb.img
             out/.config
             baseline.config
             build.log
 
-      - name: Upload diagnostic logs
-        if: always() && failure()
+      - name: Upload diagnostics on failure
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Anymore-vayu-build-diagnostics
+          name: Anymore-vayu-diagnostics
           if-no-files-found: warn
           path: |
             build.log
