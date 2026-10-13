@@ -1,0 +1,185 @@
+
+name: Anymore Kernel - Baseline Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: "16"
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            bc bison build-essential ccache \
+            clang flex git libelf-dev libssl-dev \
+            lld lz4 make python3 rsync \
+            device-tree-compiler \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi \
+            wget xz-utils
+
+      - name: Prepare toolchains
+        run: |
+          set -e
+
+          mkdir -p "$HOME/toolchains"
+
+          # Use the Clang branch specified by upstream build.sh
+          git clone --depth=1 --single-branch \
+            -b 15.0 \
+            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
+            "$HOME/toolchains/clang"
+
+          # GCC64 version referenced by upstream build.sh
+          wget -q \
+            https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/aarch64--glibc--stable-2026.08-1.tar.xz \
+            -O "$HOME/toolchains/gcc64.tar.xz"
+
+          mkdir -p "$HOME/toolchains/gcc64"
+
+          tar -xJf "$HOME/toolchains/gcc64.tar.xz" \
+            -C "$HOME/toolchains/gcc64" \
+            --strip-components=1
+
+          echo "$HOME/toolchains/clang/bin" >> "$GITHUB_PATH"
+          echo "$HOME/toolchains/gcc64/bin" >> "$GITHUB_PATH"
+
+          echo "=== Clang ==="
+          "$HOME/toolchains/clang/bin/clang" --version
+
+          echo "=== GCC64 ==="
+          "$HOME/toolchains/gcc64/bin/aarch64-linux-gnu-gcc" --version
+
+          echo "=== GCC32 ==="
+          arm-linux-gnueabi-gcc --version
+
+      - name: Check source and configuration
+        run: |
+          set -e
+
+          test -f Makefile
+          test -f arch/arm64/Makefile
+          test -f arch/arm64/configs/vayu_defconfig
+
+          echo "=== Commit ==="
+          git log -1 --oneline
+
+          echo "=== Kernel version ==="
+          make kernelversion
+
+          echo "=== Defconfig ==="
+          test -s arch/arm64/configs/vayu_defconfig
+
+      - name: Generate baseline config
+        run: |
+          set -e
+
+          make O=out ARCH=arm64 vayu_defconfig
+
+          test -s out/.config
+
+          cp out/.config baseline.config
+
+      - name: Compile kernel
+        run: |
+          set -o pipefail
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export KBUILD_BUILD_USER="GitHub-Actions"
+          export KBUILD_BUILD_HOST="Anymore-Baseline"
+
+          export PATH="$HOME/toolchains/clang/bin:$HOME/toolchains/gcc64/bin:$PATH"
+
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            2>&1 | tee build.log
+
+      - name: Verify kernel output
+        if: success()
+        run: |
+          set -e
+
+          IMAGE="out/arch/arm64/boot/Image"
+
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image was not generated."
+            exit 1
+          fi
+
+          echo "=== Kernel image ==="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+
+          echo "=== Optional outputs ==="
+          for f in \
+            out/arch/arm64/boot/Image.gz \
+            out/vmlinux \
+            out/System.map
+          do
+            if [ -s "$f" ]; then
+              ls -lh "$f"
+            fi
+          done
+
+      - name: Upload kernel build artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Anymore-vayu-baseline
+          if-no-files-found: error
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/Image.gz
+            out/vmlinux
+            out/System.map
+            out/.config
+            baseline.config
+            build.log
+
+      - name: Upload diagnostic logs
+        if: always() && failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Anymore-vayu-build-diagnostics
+          if-no-files-found: warn
+          path: |
+            build.log
+            baseline.config
+            out/.config
