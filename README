@@ -1,18 +1,49 @@
-Linux kernel
-============
+# Xen-Kernel
 
-This file was moved to Documentation/admin-guide/README.rst
+**Smooth. Faster. Stable.**
 
-Please notice that there are several guides for kernel developers and users.
-These guides can be rendered in a number of formats, like HTML and PDF.
+Xen-Kernel is an experimental custom kernel project for the **POCO X3 Pro (vayu)**, based on Anymore Kernel.
 
-In order to build the documentation, use ``make htmldocs`` or
-``make pdfdocs``.
+The project aims to explore a better balance between gaming performance, system stability, thermal management, and battery efficiency through continuous development, testing, and optimization.
 
-There are various text files in the Documentation/ subdirectory,
-several of them using the Restructured Text markup notation.
-See Documentation/00-INDEX for a list of what is contained in each file.
+### Project Goals
 
-Please read the Documentation/process/changes.rst file, as it contains the
-requirements for building and running the kernel, and information about
-the problems which may result by upgrading your kernel.
+* 🎮 Gaming performance and responsiveness
+* ⚡ System smoothness and reduced latency
+* 🌡️ Stable thermal behavior
+* 🔋 Balanced battery efficiency
+* 🛠️ Kernel customization and feature development
+
+### Build Information
+
+* **Device:** POCO X3 Pro (vayu)
+* **Base Kernel:** Anymore Kernel
+* **Kernel Version:** Linux 4.14.357
+* **Architecture:** ARM64
+* **Compiler:** Clang 20.0.0
+* **Linker:** LLD 20.0.0
+* **Build Environment:** GitHub Actions
+* **Current Stage:** Experimental baseline build
+
+### Development Status
+
+The initial baseline has been successfully compiled and boot-tested on a POCO X3 Pro. Further testing and development are required before making any claims about performance, thermal behavior, battery life, or compatibility.
+
+Planned development includes KernelSU Next integration, stability testing, and gradual performance tuning.
+
+### Community & Contact
+
+📢 **Telegram Channel:** https://t.me/Xen_chanel
+
+👤 **Developer Telegram:** @Lvyana_ren
+
+### Disclaimer
+
+Xen-Kernel is an experimental project. Builds may contain bugs, instability, or other unexpected issues. Always keep a backup of your current boot image and a recovery plan before flashing. Use experimental builds at your own risk.
+
+### Credits
+
+* **Anymore Kernel Project** — upstream kernel source and project foundation.
+* Contributors and testers who help improve the project.
+
+**XEN-KERNEL — Smooth. Faster. Stable.**
