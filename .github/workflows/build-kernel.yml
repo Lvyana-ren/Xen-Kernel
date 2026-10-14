@@ -1,5 +1,5 @@
 
-name: Anymore Vayu - Baseline Build
+name: Xen-Kernel - Baseline Build
 
 on:
   workflow_dispatch:
@@ -78,20 +78,34 @@ jobs:
           ld.lld --version
           llvm-ar --version
 
-      - name: Generate baseline defconfig
-        run: |
-          set -e
+     ```
+  - name: Generate baseline defconfig
+    run: |
+      set -e
 
-          export ARCH=arm64
-          export PATH="$HOME/clang/bin:$PATH"
+      export ARCH=arm64
+      export PATH="$HOME/clang/bin:$PATH"
 
-          make ARCH=arm64 O=out vayu_defconfig
+      make ARCH=arm64 O=out vayu_defconfig
 
-          test -s out/.config
-          cp out/.config baseline.config
+      # Set Xen-Kernel version suffix
+      scripts/config --file out/.config --set-str LOCALVERSION "-Xen"
+      scripts/config --file out/.config --disable LOCALVERSION_AUTO
 
-          echo "=== Config generated successfully ==="
-          wc -l out/.config
+      make ARCH=arm64 O=out olddefconfig
+
+      # Save the final configuration
+      cp out/.config baseline.config
+
+      echo "=== Kernel version ==="
+      make kernelversion
+
+      echo "=== Kernel release ==="
+      make ARCH=arm64 O=out kernelrelease
+
+      echo "=== Local version ==="
+      grep '^CONFIG_LOCALVERSION=' out/.config
+```
 
       - name: Compile kernel
         run: |
@@ -100,8 +114,8 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$HOME/clang/bin:$PATH"
-          export KBUILD_BUILD_USER="GitHub-Actions"
-          export KBUILD_BUILD_HOST="AnymoreProject"
+          export KBUILD_BUILD_USER="Lvyana"
+          export KBUILD_BUILD_HOST="Xen-Kernel"
 
           make -j"$(nproc)" \
             O=out \
@@ -154,7 +168,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Anymore-vayu-baseline
+          name: Xen-Kernel-baseline
           if-no-files-found: error
           path: |
             out/arch/arm64/boot/Image
