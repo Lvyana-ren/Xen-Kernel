@@ -22,6 +22,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          set -e
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential ccache \
@@ -66,6 +67,7 @@ jobs:
           test -f Makefile
           test -f arch/arm64/Makefile
           test -f arch/arm64/configs/vayu_defconfig
+          test -f scripts/config
 
           echo "=== GCC64 ==="
           aarch64-linux-gnu-gcc --version
@@ -74,42 +76,43 @@ jobs:
           arm-linux-gnueabi-gcc --version
 
           echo "=== LLVM tools ==="
-          clang --version
-          ld.lld --version
-          llvm-ar --version
+          "$HOME/clang/bin/clang" --version
+          "$HOME/clang/bin/ld.lld" --version
+          "$HOME/clang/bin/llvm-ar" --version
 
-     ```
-  - name: Generate baseline defconfig
-    run: |
-      set -e
+      - name: Generate baseline defconfig
+        run: |
+          set -e
 
-      export ARCH=arm64
-      export PATH="$HOME/clang/bin:$PATH"
+          export ARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
 
-      make ARCH=arm64 O=out vayu_defconfig
+          make ARCH=arm64 O=out vayu_defconfig
 
-      # Set Xen-Kernel version suffix
-      scripts/config --file out/.config --set-str LOCALVERSION "-Xen"
-      scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          # Set Xen-Kernel version suffix
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Xen"
 
-      make ARCH=arm64 O=out olddefconfig
+          scripts/config --file out/.config \
+            --disable LOCALVERSION_AUTO
 
-      # Save the final configuration
-      cp out/.config baseline.config
+          make ARCH=arm64 O=out olddefconfig
 
-      echo "=== Kernel version ==="
-      make kernelversion
+          # Save the final configuration
+          cp out/.config baseline.config
 
-      echo "=== Kernel release ==="
-      make ARCH=arm64 O=out kernelrelease
+          echo "=== Kernel version ==="
+          make kernelversion
 
-      echo "=== Local version ==="
-      grep '^CONFIG_LOCALVERSION=' out/.config
-```
+          echo "=== Kernel release ==="
+          make ARCH=arm64 O=out kernelrelease
+
+          echo "=== Local version ==="
+          grep '^CONFIG_LOCALVERSION=' out/.config
 
       - name: Compile kernel
         run: |
-          set -o pipefail
+          set -euo pipefail
 
           export ARCH=arm64
           export SUBARCH=arm64
@@ -158,6 +161,9 @@ jobs:
           file "$IMAGE"
           ls -lh "$IMAGE"
 
+          echo "=== Final kernel release ==="
+          make ARCH=arm64 O=out kernelrelease
+
           echo "=== Available build outputs ==="
           find out/arch/arm64/boot \
             -maxdepth 2 -type f \
@@ -183,7 +189,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Anymore-vayu-diagnostics
+          name: Xen-kernel-diagnostics
           if-no-files-found: warn
           path: |
             build.log
