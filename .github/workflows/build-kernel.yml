@@ -1,4 +1,4 @@
-```yaml
+
 name: Xen-Kernel-KSUN - Manual Hook Build
 
 on:
@@ -386,4 +386,3 @@ jobs:
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
-```
