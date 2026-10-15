@@ -1,288 +1,357 @@
+
 name: Xen-Kernel-KSUN - Legacy Kprobe Build
 
 on:
-workflow_dispatch:
+  workflow_dispatch:
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-build:
-runs-on: ubuntu-22.04
-timeout-minutes: 360
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
 
-```
-steps:
-  - name: Checkout Xen-Kernel-KSUN source
-    uses: actions/checkout@v4
-    with:
-      ref: "16-KSUN"
-      fetch-depth: 1
-      lfs: true
+    steps:
+      # ============================================================
+      # 1. Checkout Xen-Kernel KSUN branch
+      # ============================================================
+      - name: Checkout Xen-Kernel-KSUN source
+        uses: actions/checkout@v4
+        with:
+          ref: "16-KSUN"
+          fetch-depth: 1
+          lfs: true
 
-  - name: Integrate KernelSU Next Legacy
-    shell: bash
-    run: |
-      set -euo pipefail
+      # ============================================================
+      # 2. Integrate KernelSU Next Legacy
+      # ============================================================
+      - name: Integrate KernelSU Next Legacy
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      echo "=== Integrating KernelSU Next Legacy ==="
+          echo "=== Integrating KernelSU Next Legacy ==="
 
-      if [ -d KernelSU-Next ] || [ -d KernelSU ]; then
-        echo "::error::Existing KernelSU directory detected."
-        exit 1
-      fi
+          if [ -e KernelSU-Next ] || [ -e KernelSU ]; then
+            echo "::error::Existing KernelSU directory detected."
+            exit 1
+          fi
 
-      curl -fLSs \
-        https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
-        -o /tmp/ksu-next-setup.sh
+          curl -fLSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            -o /tmp/ksu-next-setup.sh
 
-      bash /tmp/ksu-next-setup.sh legacy
+          bash /tmp/ksu-next-setup.sh legacy
 
-      test -d KernelSU-Next/kernel
-      test -L drivers/kernelsu
-      test -f drivers/kernelsu/Kconfig
+          if [ ! -d KernelSU-Next/kernel ]; then
+            echo "::error::KernelSU Next kernel directory missing."
+            exit 1
+          fi
 
-      echo "=== KernelSU Next commit ==="
-      git -C KernelSU-Next rev-parse HEAD
-      git -C KernelSU-Next branch --show-current
+          if [ ! -L drivers/kernelsu ]; then
+            echo "::error::KernelSU Next legacy symlink missing."
+            ls -la drivers/
+            exit 1
+          fi
 
-      echo "=== KernelSU Kconfig symbols ==="
-      grep -R -n -E \
-        'config (KSU|KSU_KPROBE_HOOKS|KPROBE_HOOKS)' \
-        KernelSU-Next/kernel drivers/kernelsu \
-        2>/dev/null || true
+          if [ ! -f drivers/kernelsu/Kconfig ]; then
+            echo "::error::KernelSU Next Kconfig missing."
+            exit 1
+          fi
 
-      echo "=== KernelSU integration verified ==="
-      ls -ld drivers/kernelsu
+          echo "=== KernelSU Next source commit ==="
+          git -C KernelSU-Next rev-parse HEAD
+          git -C KernelSU-Next branch --show-current
 
-  - name: Install build dependencies
-    shell: bash
-    run: |
-      set -euo pipefail
+          echo "=== KernelSU Kconfig symbols ==="
+          grep -R -n -E \
+            '^[[:space:]]*config (KSU|KSU_KPROBE_HOOKS|KPROBE_HOOKS)([[:space:]]|$)' \
+            KernelSU-Next/kernel drivers/kernelsu \
+            2>/dev/null || true
 
-      sudo apt-get update
-      sudo apt-get install -y \
-        bc bison build-essential ccache \
-        clang flex git libelf-dev libssl-dev \
-        lld llvm make python3 rsync \
-        device-tree-compiler \
-        gcc-aarch64-linux-gnu \
-        gcc-arm-linux-gnueabi \
-        binutils-aarch64-linux-gnu \
-        binutils-arm-linux-gnueabi \
-        libncurses-dev lz4 zip wget xz-utils file
+          echo "=== Legacy integration verified ==="
+          ls -ld drivers/kernelsu
 
-  - name: Prepare upstream Clang
-    shell: bash
-    run: |
-      set -euo pipefail
+      # ============================================================
+      # 3. Install build dependencies
+      # ============================================================
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      git clone --depth=1 \
-        --single-branch \
-        --branch 15.0 \
-        https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
-        "$HOME/clang"
+          sudo apt-get update
 
-      echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+          sudo apt-get install -y \
+            bc bison build-essential ccache \
+            clang flex git libelf-dev libssl-dev \
+            lld llvm make python3 rsync \
+            device-tree-compiler \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi \
+            libncurses-dev \
+            lz4 zip wget xz-utils file
 
-      "$HOME/clang/bin/clang" --version
-      "$HOME/clang/bin/ld.lld" --version
+      # ============================================================
+      # 4. Prepare the same Clang toolchain as the main branch
+      # ============================================================
+      - name: Prepare upstream Clang
+        shell: bash
+        run: |
+          set -euo pipefail
 
-  - name: Check source and toolchains
-    shell: bash
-    run: |
-      set -euo pipefail
+          git clone --depth=1 \
+            --single-branch \
+            --branch 15.0 \
+            "https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git" \
+            "$HOME/clang"
 
-      git log -1 --oneline
-      make kernelversion
+          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
 
-      test -f Makefile
-      test -f arch/arm64/Makefile
-      test -f arch/arm64/configs/vayu_defconfig
-      test -f scripts/config
+          echo "=== Clang version ==="
+          "$HOME/clang/bin/clang" --version
 
-      aarch64-linux-gnu-gcc --version
-      arm-linux-gnueabi-gcc --version
-      "$HOME/clang/bin/llvm-ar" --version
+          echo "=== LLD version ==="
+          "$HOME/clang/bin/ld.lld" --version
 
-  - name: Generate KSU defconfig and diagnose Kprobe
-    shell: bash
-    run: |
-      set -euo pipefail
+          echo "=== LLVM archiver ==="
+          "$HOME/clang/bin/llvm-ar" --version
 
-      export ARCH=arm64
-      export PATH="$HOME/clang/bin:$PATH"
+      # ============================================================
+      # 5. Validate source and toolchains
+      # ============================================================
+      - name: Check source and toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      make ARCH=arm64 O=out vayu_defconfig
+          echo "=== Source commit ==="
+          git log -1 --oneline
 
-      echo "=== Inspect available KSU configuration symbols ==="
-      grep -R -n -E \
-        'config (KSU|KSU_KPROBE_HOOKS|KPROBE_HOOKS)' \
-        KernelSU-Next/kernel drivers/kernelsu \
-        2>/dev/null || true
+          echo "=== Kernel version ==="
+          make kernelversion
 
-      echo "=== Configure kernel features ==="
+          echo "=== Required source files ==="
+          test -f Makefile
+          test -f arch/arm64/Makefile
+          test -f arch/arm64/configs/vayu_defconfig
+          test -f scripts/config
 
-      scripts/config --file out/.config --enable MODULES
-      scripts/config --file out/.config --enable KPROBES
-      scripts/config --file out/.config --enable PERF_EVENTS
-      scripts/config --file out/.config --enable TRACING
-      scripts/config --file out/.config --enable FTRACE
-      scripts/config --file out/.config --enable FUNCTION_TRACER
-      scripts/config --file out/.config --enable KPROBE_EVENTS
-      scripts/config --file out/.config --enable KSU
+          echo "=== GCC64 ==="
+          aarch64-linux-gnu-gcc --version
 
-      # Enable this option only if it exists in the integrated source.
-      if grep -R -q -E \
-        '^[[:space:]]*config KSU_KPROBE_HOOKS([[:space:]]|$)' \
-        KernelSU-Next/kernel drivers/kernelsu 2>/dev/null; then
-        scripts/config --file out/.config --enable KSU_KPROBE_HOOKS
-      else
-        echo "::notice::KSU_KPROBE_HOOKS is not defined by the integrated source."
-      fi
+          echo "=== GCC32 ==="
+          arm-linux-gnueabi-gcc --version
 
-      scripts/config --file out/.config \
-        --set-str LOCALVERSION "-Xen-KSUN"
+          echo "=== LLVM tools ==="
+          "$HOME/clang/bin/clang" --version
+          "$HOME/clang/bin/ld.lld" --version
+          "$HOME/clang/bin/llvm-ar" --version
 
-      scripts/config --file out/.config \
-        --disable LOCALVERSION_AUTO
+      # ============================================================
+      # 6. Configure KernelSU Next Legacy and diagnose Kprobe
+      # ============================================================
+      - name: Configure KernelSU Next Kprobe
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      make ARCH=arm64 O=out olddefconfig
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
 
-      echo "=== Final Kconfig values ==="
-      grep -E \
-        '^(CONFIG_(MODULES|KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|PERF_EVENTS|TRACING|HAVE_REGS_AND_STACK_ACCESS_API|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING|PROBE_EVENTS)=|# CONFIG_(MODULES|KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING|PROBE_EVENTS) is not set)' \
-        out/.config || true
+          echo "=== Generate vayu defconfig ==="
+          make ARCH=arm64 O=out vayu_defconfig
 
-      echo "=== Kprobe definition ==="
-      grep -n -B 15 -A 25 'config KPROBE_EVENTS' \
-        kernel/trace/Kconfig || true
+          echo "=== Configure KernelSU Next ==="
 
-      echo "=== Relevant Kconfig definitions ==="
-      grep -R -n -E \
-        'config (KSU|KSU_KPROBE_HOOKS|KPROBE_HOOKS|KPROBE_EVENTS|PROBE_EVENTS|HAVE_REGS_AND_STACK_ACCESS_API|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER)' \
-        Kconfig arch/arm64 kernel KernelSU-Next/kernel \
-        2>/dev/null || true
+          scripts/config --file out/.config --enable MODULES
+          scripts/config --file out/.config --enable KPROBES
+          scripts/config --file out/.config --enable KPROBE_EVENTS
+          scripts/config --file out/.config --enable PERF_EVENTS
+          scripts/config --file out/.config --enable TRACING
+          scripts/config --file out/.config --enable KSU
+          scripts/config --file out/.config --enable KSU_KPROBE_HOOKS
 
-      echo "=== Final symbol states ==="
-      for option in \
-        MODULES KSU KPROBES KPROBE_EVENTS \
-        KSU_KPROBE_HOOKS HAVE_REGS_AND_STACK_ACCESS_API \
-        PERF_EVENTS TRACING FTRACE FUNCTION_TRACER \
-        TRACEPOINTS EVENT_TRACING PROBE_EVENTS; do
-        printf '%s: ' "$option"
-        scripts/config --file out/.config --state "$option" || true
-      done
+          echo "=== Set Xen-Kernel version suffix ==="
 
-      if ! grep -qx 'CONFIG_KSU=y' out/.config; then
-        echo "::error::KernelSU is not enabled in the final configuration."
-        exit 1
-      fi
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Xen-KSUN"
 
-      if ! grep -qx 'CONFIG_KPROBES=y' out/.config; then
-        echo "::error::KPROBES is not enabled in the final configuration."
-        exit 1
-      fi
+          scripts/config --file out/.config \
+            --disable LOCALVERSION_AUTO
 
-      if ! grep -qx 'CONFIG_KPROBE_EVENTS=y' out/.config; then
-        echo "::error::KPROBE_EVENTS is still disabled after olddefconfig. See Kconfig diagnostics above."
-        exit 1
-      fi
+          echo "=== Resolve Kconfig dependencies ==="
 
-      cp out/.config baseline.config
+          make ARCH=arm64 O=out olddefconfig
 
-      echo "=== Kernel version ==="
-      make kernelversion
+          echo "=== Final Kconfig values ==="
 
-      echo "=== Kernel release ==="
-      make ARCH=arm64 O=out kernelrelease
+          grep -E \
+            '^(CONFIG_(MODULES|KSU|KSU_KPROBE_HOOKS|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING|PROBE_EVENTS)=|# CONFIG_(MODULES|KSU|KSU_KPROBE_HOOKS|KPROBES|KPROBE_EVENTS|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING|PROBE_EVENTS) is not set)' \
+            out/.config || true
 
-      grep '^CONFIG_LOCALVERSION=' out/.config
+          echo "=== Relevant Kconfig definitions ==="
 
-  - name: Compile kernel
-    shell: bash
-    run: |
-      set -euo pipefail
+          grep -n -B 20 -A 25 'config KPROBE_EVENTS' \
+            kernel/trace/Kconfig || true
 
-      export ARCH=arm64
-      export SUBARCH=arm64
-      export PATH="$HOME/clang/bin:$PATH"
-      export KBUILD_BUILD_USER="Lvyana"
-      export KBUILD_BUILD_HOST="Xen-Kernel"
+          grep -R -n -E \
+            '^[[:space:]]*config (KSU|KSU_KPROBE_HOOKS|KPROBES|KPROBE_EVENTS|PROBE_EVENTS|HAVE_REGS_AND_STACK_ACCESS_API|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING)([[:space:]]|$)' \
+            Kconfig arch/arm64 kernel KernelSU-Next/kernel \
+            2>/dev/null || true
 
-      make -j"$(nproc)" \
-        O=out \
-        ARCH=arm64 \
-        SUBARCH=arm64 \
-        DTC_EXT=dtc \
-        CLANG_TRIPLE=aarch64-linux-gnu- \
-        CROSS_COMPILE=aarch64-linux-gnu- \
-        CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-        CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-        LD=ld.lld \
-        AR=llvm-ar \
-        NM=llvm-nm \
-        STRIP=llvm-strip \
-        OBJCOPY=llvm-objcopy \
-        OBJDUMP=llvm-objdump \
-        READELF=llvm-readelf \
-        HOSTCC=clang \
-        HOSTCXX=clang++ \
-        HOSTAR=llvm-ar \
-        HOSTLD=ld.lld \
-        LLVM=1 \
-        LLVM_IAS=1 \
-        CC="ccache clang" \
-        2>&1 | tee build.log
+          echo "=== Kconfig symbol states ==="
 
-  - name: Verify kernel image
-    if: success()
-    shell: bash
-    run: |
-      set -euo pipefail
+          for option in \
+            MODULES KSU KSU_KPROBE_HOOKS \
+            KPROBES KPROBE_EVENTS \
+            PERF_EVENTS TRACING FTRACE \
+            FUNCTION_TRACER TRACEPOINTS EVENT_TRACING \
+            HAVE_REGS_AND_STACK_ACCESS_API; do
 
-      IMAGE="out/arch/arm64/boot/Image"
+            printf '%s: ' "$option"
+            scripts/config --file out/.config --state "$option" || true
+          done
 
-      if [ ! -s "$IMAGE" ]; then
-        echo "::error::Kernel Image not found."
-        exit 1
-      fi
+          echo "=== Validate required options ==="
 
-      file "$IMAGE"
-      ls -lh "$IMAGE"
+          failed=0
 
-      echo "=== Kernel release ==="
-      make ARCH=arm64 O=out kernelrelease
+          for option in \
+            MODULES KSU KSU_KPROBE_HOOKS \
+            KPROBES KPROBE_EVENTS; do
 
-      echo "=== Available outputs ==="
-      find out/arch/arm64/boot \
-        -maxdepth 2 -type f \
-        \( -name 'Image*' -o -name '*.dtb' -o -name 'dtbo.img' \) \
-        -print
+            if ! grep -qx "CONFIG_${option}=y" out/.config; then
+              echo "::error::CONFIG_${option} is not enabled after olddefconfig."
+              failed=1
+            else
+              echo "CONFIG_${option}=y [OK]"
+            fi
+          done
 
-  - name: Upload Xen-Kernel-KSUN artifacts
-    if: success()
-    uses: actions/upload-artifact@v4
-    with:
-      name: Xen-Kernel-KSUN-legacy-kprobe
-      if-no-files-found: warn
-      path: |
-        out/arch/arm64/boot/Image
-        out/arch/arm64/boot/Image.gz
-        out/arch/arm64/boot/dtbo.img
-        out/arch/arm64/boot/dtb.img
-        out/.config
-        baseline.config
-        build.log
+          if [ "$failed" -ne 0 ]; then
+            echo "=== Kprobe dependency diagnostics ==="
 
-  - name: Upload diagnostics on failure
-    if: failure()
-    uses: actions/upload-artifact@v4
-    with:
-      name: Xen-Kernel-KSUN-diagnostics
-      if-no-files-found: warn
-      path: |
-        build.log
-        baseline.config
-        out/.config
-```
+            grep -R -n -E \
+              'config (KPROBE_EVENTS|PROBE_EVENTS|HAVE_REGS_AND_STACK_ACCESS_API|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING)' \
+              Kconfig arch/arm64 kernel \
+              2>/dev/null || true
+
+            echo "::error::Required KSUN/Kprobe configuration is unavailable."
+            exit 1
+          fi
+
+          echo "=== Save validated configuration ==="
+          cp out/.config baseline.config
+
+          echo "=== Kernel version ==="
+          make kernelversion
+
+          echo "=== Kernel release ==="
+          make ARCH=arm64 O=out kernelrelease
+
+          grep '^CONFIG_LOCALVERSION=' out/.config
+
+      # ============================================================
+      # 7. Compile Xen-Kernel KSUN
+      # ============================================================
+      - name: Compile kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
+          export KBUILD_BUILD_USER="Lvyana"
+          export KBUILD_BUILD_HOST="Xen-Kernel"
+
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            2>&1 | tee build.log
+
+      # ============================================================
+      # 8. Verify build output
+      # ============================================================
+      - name: Verify kernel image
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          IMAGE="out/arch/arm64/boot/Image"
+
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image not found or empty."
+            exit 1
+          fi
+
+          echo "=== Kernel image ==="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+
+          echo "=== Kernel release ==="
+          make ARCH=arm64 O=out kernelrelease
+
+          echo "=== Available build outputs ==="
+          find out/arch/arm64/boot \
+            -maxdepth 2 -type f \
+            \( -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" \) \
+            -print
+
+      # ============================================================
+      # 9. Upload successful build artifacts
+      # ============================================================
+      - name: Upload Xen-Kernel-KSUN artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KSUN-legacy-kprobe
+          if-no-files-found: error
+          path: |
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/dtbo.img
+            out/arch/arm64/boot/dtb.img
+            out/.config
+            baseline.config
+            build.log
+
+      # ============================================================
+      # 10. Upload diagnostics if the build fails
+      # ============================================================
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KSUN-diagnostics
+          if-no-files-found: warn
+          path: |
+            build.log
+            baseline.config
+            out/.config
