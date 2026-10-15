@@ -1,5 +1,5 @@
 
-name: Xen-Kernel-KSUN - Latest Manual Hook Build
+name: Xen-Kernel-KSUN - Manual Hook Build
 
 on:
   workflow_dispatch:
@@ -452,7 +452,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KSUN-Latest-Manual-Hook
+          name: Xen-Kernel-KSUN-Manual-Hook
           if-no-files-found: error
           path: |
             out/arch/arm64/boot/Image
@@ -470,7 +470,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KSUN-Latest-Manual-Hook-diagnostics
+          name: Xen-Kernel-KSUN-Manual-Hook-diagnostics
           if-no-files-found: warn
           path: |
             config.log
