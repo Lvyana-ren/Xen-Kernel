@@ -120,6 +120,7 @@ jobs:
           "$HOME/clang/bin/ld.lld" --version
           "$HOME/clang/bin/llvm-ar" --version
 
+      
       - name: Generate KSU defconfig
         run: |
           set -euo pipefail
@@ -128,6 +129,55 @@ jobs:
           export PATH="$HOME/clang/bin:$PATH"
 
           make ARCH=arm64 O=out vayu_defconfig
+
+          echo "=== KernelSU Next: enable dependencies ==="
+
+          scripts/config --file out/.config --enable MODULES
+          scripts/config --file out/.config --enable KPROBES
+          scripts/config --file out/.config --enable KPROBE_EVENTS
+          scripts/config --file out/.config --enable KSU_KPROBE_HOOKS
+          scripts/config --file out/.config --enable KSU
+
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Xen-KSUN"
+
+          scripts/config --file out/.config \
+            --disable LOCALVERSION_AUTO
+
+          make ARCH=arm64 O=out olddefconfig
+
+          echo "=== Kprobe and KernelSU config ==="
+
+          grep -E '^(CONFIG_(MODULES|KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=|# CONFIG_(MODULES|KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS) is not set)' \
+            out/.config || true
+
+          echo "=== Check Kconfig definitions ==="
+
+          grep -R -n -E \
+            'config (MODULES|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)' \
+            Kconfig arch/arm64/Kconfig kernel KSU-Next/kernel \
+            2>/dev/null || true
+
+          echo "=== Check required options ==="
+
+          for option in KSU KPROBES KPROBE_EVENTS KSU_KPROBE_HOOKS; do
+            if ! grep -qx "CONFIG_${option}=y" out/.config; then
+              echo "::error::CONFIG_${option} is not enabled."
+              echo "Inspect the Kconfig definitions and dependencies above."
+              exit 1
+            fi
+          done
+
+          cp out/.config baseline.config
+
+          echo "=== Kernel version ==="
+          make kernelversion
+
+          echo "=== Kernel release ==="
+          make ARCH=arm64 O=out kernelrelease
+
+          echo "=== Local version ==="
+          grep '^CONFIG_LOCALVERSION=' out/.config
 
           echo "=== Enable KernelSU Next Kprobe hooks ==="
 
