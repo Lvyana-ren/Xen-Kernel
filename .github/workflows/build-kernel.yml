@@ -26,6 +26,7 @@ jobs:
           set -euo pipefail
 
           sudo apt-get update
+
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bc \
             bison \
@@ -54,7 +55,6 @@ jobs:
 
           if [ -e KernelSU-Next ] || [ -e KernelSU ]; then
             echo "::error::A KernelSU source directory already exists."
-            echo "Check the current source tree before continuing."
             exit 1
           fi
 
@@ -67,7 +67,7 @@ jobs:
           test -d KernelSU-Next/kernel
           test -e drivers/kernelsu
 
-          echo "===== Installed KernelSU-Next revision ====="
+          echo "===== KernelSU-Next revision ====="
           git -C KernelSU-Next rev-parse HEAD
           git -C KernelSU-Next describe --tags --always || true
 
@@ -80,7 +80,7 @@ jobs:
 
           python3 scripts/apply-ksun-manual-hooks.py
 
-          echo "===== Verify all five hooks ====="
+          echo "===== Verify five hook points ====="
           grep -n 'ksu_handle_execveat' fs/exec.c
           grep -n 'ksu_handle_faccessat' fs/open.c
           grep -n 'ksu_handle_sys_read\|ksu_vfs_read_hook' fs/read_write.c
@@ -101,7 +101,6 @@ jobs:
             's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION = -openela-Xen-KSUN/' \
             Makefile
 
-          # Find the actual vayu defconfig in this source tree.
           DEFCONFIG_PATH=""
 
           for candidate in \
@@ -117,15 +116,15 @@ jobs:
 
           if [ -z "$DEFCONFIG_PATH" ]; then
             echo "::error::No known vayu defconfig was found."
-            echo "Available vayu configs:"
             find arch/arm64/configs -type f -iname '*vayu*' -print || true
             exit 1
           fi
 
           DEFCONFIG="${DEFCONFIG_PATH#arch/arm64/configs/}"
+
           echo "Using defconfig: $DEFCONFIG"
 
-          make O=out "$DEFCONFIG"
+          make O=out ARCH=arm64 "$DEFCONFIG"
 
           scripts/config --file out/.config \
             --enable MODULES \
@@ -135,11 +134,12 @@ jobs:
             --disable KSU_KPROBES_HOOK \
             --disable KSU_SYSCALL_TABLE_HOOK
 
-          make O=out olddefconfig
+          make O=out ARCH=arm64 olddefconfig
 
           echo "===== Effective KSUN configuration ====="
+
           grep -E \
-            'CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK)=' \
+            '^(CONFIG_KSU|CONFIG_KSU_MANUAL_HOOK|CONFIG_KSU_KPROBES_HOOK|CONFIG_KSU_SYSCALL_TABLE_HOOK)=' \
             out/.config || true
 
           if ! grep -q '^CONFIG_KSU=y' out/.config; then
@@ -168,7 +168,7 @@ jobs:
           test -x clang/bin/clang
           clang/bin/clang --version
 
-      - name: Build Xen-Kernel
+      - name: Build Xen-Kernel Image
         shell: bash
         run: |
           set -euo pipefail
@@ -182,7 +182,10 @@ jobs:
 
           mkdir -p out
 
+          echo "===== Starting kernel Image build ====="
+
           set +e
+
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
@@ -191,9 +194,10 @@ jobs:
             LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            2>&1 | tee build.log
+            Image 2>&1 | tee build.log
 
           BUILD_STATUS=${PIPESTATUS[0]}
+
           set -e
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
@@ -201,30 +205,71 @@ jobs:
             exit "$BUILD_STATUS"
           fi
 
-          test -s out/arch/arm64/boot/Image
+          echo "===== Verify kernel Image ====="
+
+          if [ ! -s out/arch/arm64/boot/Image ]; then
+            echo "::error::Build finished but Image is missing or empty."
+
+            find out/arch/arm64/boot \
+              -maxdepth 4 -type f \
+              \( -name 'Image*' -o -name '*.dtb' \) \
+              -print 2>/dev/null || true
+
+            exit 1
+          fi
+
+          ls -lh out/arch/arm64/boot/Image
+          file out/arch/arm64/boot/Image
 
           echo "===== Kernel release ====="
-          make -s O=out kernelrelease
+          make -s O=out ARCH=arm64 kernelrelease
+
+      - name: Diagnose build outputs
+        if: always()
+        shell: bash
+        run: |
+          echo "===== Image and DTB candidates ====="
+
+          find out/arch/arm64/boot \
+            -maxdepth 5 -type f \
+            \( -name 'Image*' -o -name '*.dtb' -o -name 'vmlinux' \) \
+            -print 2>/dev/null || true
+
+          echo "===== Build errors ====="
+
+          if [ -f build.log ]; then
+            grep -iE \
+              'error:|undefined reference|No rule to make target|Error [0-9]+' \
+              build.log | tail -n 60 || true
+          fi
 
       - name: Collect build artifacts
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           mkdir -p artifacts
 
-          [ ! -f build.log ] || cp build.log artifacts/
-          [ ! -f out/.config ] || cp out/.config artifacts/kernel.config
+          if [ -f build.log ]; then
+            cp build.log artifacts/
+          fi
 
-          [ ! -f out/arch/arm64/boot/Image ] || \
-            cp out/arch/arm64/boot/Image artifacts/
+          if [ -f out/.config ]; then
+            cp out/.config artifacts/kernel.config
+          fi
 
-          [ ! -f out/arch/arm64/boot/Image.gz ] || \
+          if [ -s out/arch/arm64/boot/Image ]; then
+            cp out/arch/arm64/boot/Image artifacts/Image
+          fi
+
+          if [ -s out/arch/arm64/boot/Image.gz ]; then
             cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
 
-          [ ! -f out/arch/arm64/boot/Image.gz-dtb ] || \
+          if [ -s out/arch/arm64/boot/Image.gz-dtb ]; then
             cp out/arch/arm64/boot/Image.gz-dtb artifacts/
+          fi
 
           if [ -d out/arch/arm64/boot/dts ]; then
             find out/arch/arm64/boot/dts \
@@ -232,15 +277,26 @@ jobs:
               -exec cp --parents '{}' artifacts/ \; || true
           fi
 
-          git rev-parse HEAD > artifacts/source-commit.txt
+          if [ -f Makefile ]; then
+            make -s O=out ARCH=arm64 kernelrelease \
+              > artifacts/kernel-release.txt 2>&1 || true
+          fi
+
+          git rev-parse HEAD \
+            > artifacts/source-commit.txt 2>/dev/null || true
 
           if [ -d KernelSU-Next/.git ]; then
             git -C KernelSU-Next rev-parse HEAD \
-              > artifacts/ksun-commit.txt
+              > artifacts/ksun-commit.txt 2>/dev/null || true
           fi
 
-          make -s O=out kernelrelease \
-            > artifacts/kernel-release.txt 2>&1 || true
+          echo "===== Final artifact inventory ====="
+
+          find artifacts -type f -exec ls -lh '{}' \;
+
+          if [ ! -s artifacts/Image ]; then
+            echo "::warning::No kernel Image was collected."
+          fi
 
       - name: Upload build artifacts
         if: always()
