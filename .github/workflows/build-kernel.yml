@@ -13,9 +13,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # ============================================================
-      # 1. Checkout Xen-Kernel KSUN branch
-      # ============================================================
+      # 1. Checkout Xen-Kernel KSUN source
       - name: Checkout Xen-Kernel-KSUN source
         uses: actions/checkout@v4
         with:
@@ -23,9 +21,7 @@ jobs:
           fetch-depth: 1
           lfs: true
 
-      # ============================================================
-      # 2. Integrate KernelSU Next Legacy
-      # ============================================================
+      # 2. Integrate KernelSU Next legacy
       - name: Integrate KernelSU Next Legacy
         shell: bash
         run: |
@@ -44,38 +40,23 @@ jobs:
 
           bash /tmp/ksu-next-setup.sh legacy
 
-          if [ ! -d KernelSU-Next/kernel ]; then
-            echo "::error::KernelSU Next kernel directory missing."
-            exit 1
-          fi
+          test -d KernelSU-Next/kernel
+          test -L drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
 
-          if [ ! -L drivers/kernelsu ]; then
-            echo "::error::KernelSU Next legacy symlink missing."
-            ls -la drivers/
-            exit 1
-          fi
-
-          if [ ! -f drivers/kernelsu/Kconfig ]; then
-            echo "::error::KernelSU Next Kconfig missing."
-            exit 1
-          fi
-
-          echo "=== KernelSU Next source commit ==="
+          echo "=== KernelSU Next commit ==="
           git -C KernelSU-Next rev-parse HEAD
           git -C KernelSU-Next branch --show-current
 
-          echo "=== KernelSU Kconfig symbols ==="
-          grep -R -n -E \
-            '^[[:space:]]*config (KSU|KSU_KPROBE_HOOKS|KPROBE_HOOKS)([[:space:]]|$)' \
-            KernelSU-Next/kernel drivers/kernelsu \
-            2>/dev/null || true
+          echo "=== KernelSU hook definitions ==="
+          grep -n -A 24 -B 5 -E \
+            'KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK' \
+            KernelSU-Next/kernel/Kconfig || true
 
-          echo "=== Legacy integration verified ==="
+          echo "=== KernelSU integration verified ==="
           ls -ld drivers/kernelsu
 
-      # ============================================================
       # 3. Install build dependencies
-      # ============================================================
       - name: Install build dependencies
         shell: bash
         run: |
@@ -95,9 +76,7 @@ jobs:
             libncurses-dev \
             lz4 zip wget xz-utils file
 
-      # ============================================================
       # 4. Prepare the same Clang toolchain as the main branch
-      # ============================================================
       - name: Prepare upstream Clang
         shell: bash
         run: |
@@ -120,15 +99,13 @@ jobs:
           echo "=== LLVM archiver ==="
           "$HOME/clang/bin/llvm-ar" --version
 
-      # ============================================================
       # 5. Validate source and toolchains
-      # ============================================================
       - name: Check source and toolchains
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== Source commit ==="
+          echo "=== Kernel source commit ==="
           git log -1 --oneline
 
           echo "=== Kernel version ==="
@@ -151,9 +128,7 @@ jobs:
           "$HOME/clang/bin/ld.lld" --version
           "$HOME/clang/bin/llvm-ar" --version
 
-      # ============================================================
-      # 6. Configure KernelSU Next Legacy and diagnose Kprobe
-      # ============================================================
+      # 6. Configure KernelSU Next Kprobe
       - name: Configure KernelSU Next Kprobe
         shell: bash
         run: |
@@ -163,21 +138,22 @@ jobs:
           export SUBARCH=arm64
           export PATH="$HOME/clang/bin:$PATH"
 
-          echo "=== Generate vayu defconfig ==="
+          exec > >(tee config.log) 2>&1
+
+          echo "=== Generate vayu_defconfig ==="
           make ARCH=arm64 O=out vayu_defconfig
 
-          echo "=== Configure KernelSU Next ==="
-
+          echo "=== Enable required base options ==="
           scripts/config --file out/.config --enable MODULES
           scripts/config --file out/.config --enable KPROBES
-          scripts/config --file out/.config --enable KPROBE_EVENTS
-          scripts/config --file out/.config --enable PERF_EVENTS
-          scripts/config --file out/.config --enable TRACING
+          scripts/config --file out/.config --enable KRETPROBES
           scripts/config --file out/.config --enable KSU
-          scripts/config --file out/.config --enable KSU_KPROBE_HOOKS
+
+          echo "=== Select KernelSU Next hook mode ==="
+          scripts/config --file out/.config --disable KSU_MANUAL_HOOK
+          scripts/config --file out/.config --enable KSU_KPROBES_HOOK
 
           echo "=== Set Xen-Kernel version suffix ==="
-
           scripts/config --file out/.config \
             --set-str LOCALVERSION "-Xen-KSUN"
 
@@ -185,46 +161,28 @@ jobs:
             --disable LOCALVERSION_AUTO
 
           echo "=== Resolve Kconfig dependencies ==="
-
           make ARCH=arm64 O=out olddefconfig
 
-          echo "=== Final Kconfig values ==="
-
+          echo "=== Final relevant configuration ==="
           grep -E \
-            '^(CONFIG_(MODULES|KSU|KSU_KPROBE_HOOKS|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING|PROBE_EVENTS)=|# CONFIG_(MODULES|KSU|KSU_KPROBE_HOOKS|KPROBES|KPROBE_EVENTS|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING|PROBE_EVENTS) is not set)' \
+            '^(CONFIG_(MODULES|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KPROBES|KRETPROBES|HAVE_KPROBES|HAVE_SYSCALL_TRACEPOINTS|KPROBE_EVENTS|PERF_EVENTS|TRACING|TRACEPOINTS|EVENT_TRACING)=|# CONFIG_(MODULES|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KPROBES|KRETPROBES|KPROBE_EVENTS) is not set)' \
             out/.config || true
 
-          echo "=== Relevant Kconfig definitions ==="
+          echo "=== Hook definitions in source ==="
+          grep -n -A 24 -B 5 -E \
+            'KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK' \
+            KernelSU-Next/kernel/Kconfig || true
 
-          grep -n -B 20 -A 25 'config KPROBE_EVENTS' \
-            kernel/trace/Kconfig || true
-
-          grep -R -n -E \
-            '^[[:space:]]*config (KSU|KSU_KPROBE_HOOKS|KPROBES|KPROBE_EVENTS|PROBE_EVENTS|HAVE_REGS_AND_STACK_ACCESS_API|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING)([[:space:]]|$)' \
-            Kconfig arch/arm64 kernel KernelSU-Next/kernel \
+          echo "=== Kprobe definitions in kernel ==="
+          grep -n -A 12 -B 5 -E \
+            'config KPROBES|config KRETPROBES|config KPROBE_EVENTS|HAVE_SYSCALL_TRACEPOINTS|HAVE_REGS_AND_STACK_ACCESS_API' \
+            kernel/trace/Kconfig kernel/Kconfig arch/arm64/Kconfig \
             2>/dev/null || true
 
-          echo "=== Kconfig symbol states ==="
-
-          for option in \
-            MODULES KSU KSU_KPROBE_HOOKS \
-            KPROBES KPROBE_EVENTS \
-            PERF_EVENTS TRACING FTRACE \
-            FUNCTION_TRACER TRACEPOINTS EVENT_TRACING \
-            HAVE_REGS_AND_STACK_ACCESS_API; do
-
-            printf '%s: ' "$option"
-            scripts/config --file out/.config --state "$option" || true
-          done
-
-          echo "=== Validate required options ==="
-
+          echo "=== Validate required configuration ==="
           failed=0
 
-          for option in \
-            MODULES KSU KSU_KPROBE_HOOKS \
-            KPROBES KPROBE_EVENTS; do
-
+          for option in MODULES KSU KPROBES KRETPROBES; do
             if ! grep -qx "CONFIG_${option}=y" out/.config; then
               echo "::error::CONFIG_${option} is not enabled after olddefconfig."
               failed=1
@@ -233,15 +191,26 @@ jobs:
             fi
           done
 
+          if ! grep -qx \
+            'CONFIG_KSU_KPROBES_HOOK=y' out/.config; then
+            echo "::error::CONFIG_KSU_KPROBES_HOOK is not enabled."
+            echo "The KSUN hook choice or one of its dependencies is unavailable."
+            failed=1
+          else
+            echo "CONFIG_KSU_KPROBES_HOOK=y [OK]"
+          fi
+
+          if grep -qx \
+            'CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
+            echo "::error::Manual hook mode is active instead of Kprobe mode."
+            failed=1
+          fi
+
           if [ "$failed" -ne 0 ]; then
-            echo "=== Kprobe dependency diagnostics ==="
-
-            grep -R -n -E \
-              'config (KPROBE_EVENTS|PROBE_EVENTS|HAVE_REGS_AND_STACK_ACCESS_API|PERF_EVENTS|TRACING|FTRACE|FUNCTION_TRACER|TRACEPOINTS|EVENT_TRACING)' \
-              Kconfig arch/arm64 kernel \
-              2>/dev/null || true
-
-            echo "::error::Required KSUN/Kprobe configuration is unavailable."
+            echo "=== Configuration diagnostic summary ==="
+            grep -E \
+              'KSU|KPROBE|KRETPROBE|SYSCALL_TRACEPOINTS|MODULES|TRACING' \
+              out/.config || true
             exit 1
           fi
 
@@ -256,9 +225,7 @@ jobs:
 
           grep '^CONFIG_LOCALVERSION=' out/.config
 
-      # ============================================================
       # 7. Compile Xen-Kernel KSUN
-      # ============================================================
       - name: Compile kernel
         shell: bash
         run: |
@@ -295,9 +262,7 @@ jobs:
             CC="ccache clang" \
             2>&1 | tee build.log
 
-      # ============================================================
       # 8. Verify build output
-      # ============================================================
       - name: Verify kernel image
         if: success()
         shell: bash
@@ -324,9 +289,7 @@ jobs:
             \( -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" \) \
             -print
 
-      # ============================================================
       # 9. Upload successful build artifacts
-      # ============================================================
       - name: Upload Xen-Kernel-KSUN artifacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -340,11 +303,10 @@ jobs:
             out/arch/arm64/boot/dtb.img
             out/.config
             baseline.config
+            config.log
             build.log
 
-      # ============================================================
-      # 10. Upload diagnostics if the build fails
-      # ============================================================
+      # 10. Upload diagnostics on failure
       - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -352,6 +314,7 @@ jobs:
           name: Xen-Kernel-KSUN-diagnostics
           if-no-files-found: warn
           path: |
+            config.log
             build.log
             baseline.config
             out/.config
