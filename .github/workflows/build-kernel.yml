@@ -54,6 +54,10 @@ jobs:
             exit 1
           }
 
+          echo "=== KernelSU Next source commit ==="
+          git -C KernelSU-Next rev-parse HEAD
+          git -C KernelSU-Next branch --show-current
+
           echo "=== KernelSU Next integration verified ==="
           ls -ld drivers/kernelsu
 
@@ -108,7 +112,7 @@ jobs:
 
           "$HOME/clang/bin/llvm-ar" --version
 
-      - name: Generate KSU defconfig
+      - name: Generate KSU defconfig and diagnose Kprobe
         shell: bash
         run: |
           set -euo pipefail
@@ -138,17 +142,39 @@ jobs:
 
           echo "=== Final Kconfig values ==="
 
-          grep -E '^(CONFIG_(MODULES|KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|PERF_EVENTS|TRACING|HAVE_REGS_AND_STACK_ACCESS_API)=|# CONFIG_(MODULES|KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|PERF_EVENTS|TRACING) is not set)' \
+          grep -E '^(CONFIG_(MODULES|KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|PERF_EVENTS|TRACING|HAVE_REGS_AND_STACK_ACCESS_API|FTRACE|TRACEPOINTS|EVENT_TRACING|PROBE_EVENTS)=|# CONFIG_(MODULES|KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|PERF_EVENTS|TRACING|FTRACE|TRACEPOINTS|EVENT_TRACING|PROBE_EVENTS) is not set)' \
             out/.config || true
 
           if ! grep -qx 'CONFIG_KPROBE_EVENTS=y' out/.config; then
-            echo "::error::KPROBE_EVENTS is disabled by Kconfig."
+            echo "::warning::KPROBE_EVENTS is disabled. Collecting Kconfig diagnostics."
+
             echo "=== KPROBE_EVENTS definition ==="
-            sed -n '480,520p' kernel/trace/Kconfig
+            grep -n -B 25 -A 25 'config KPROBE_EVENTS' \
+              kernel/trace/Kconfig || true
+
+            echo "=== PROBE_EVENTS definitions ==="
+            grep -R -n -B 5 -A 15 'config PROBE_EVENTS' \
+              Kconfig kernel arch/arm64 2>/dev/null || true
+
             echo "=== Relevant symbol definitions ==="
             grep -R -n -E \
-              'config (KPROBE_EVENTS|HAVE_REGS_AND_STACK_ACCESS_API|HAVE_PERF_EVENTS|PERF_EVENTS|TRACING)' \
+              'config (KPROBE_EVENTS|PROBE_EVENTS|HAVE_REGS_AND_STACK_ACCESS_API|HAVE_PERF_EVENTS|PERF_EVENTS|TRACING|FTRACE|TRACEPOINTS|EVENT_TRACING)' \
               Kconfig arch/arm64 kernel 2>/dev/null || true
+
+            echo "=== Kconfig include locations ==="
+            grep -n -B 5 -A 5 'kernel/trace/Kconfig' \
+              Kconfig || true
+
+            echo "=== Full relevant config state ==="
+            for option in \
+              KPROBE_EVENTS PROBE_EVENTS KPROBES \
+              HAVE_REGS_AND_STACK_ACCESS_API PERF_EVENTS \
+              TRACING FTRACE TRACEPOINTS EVENT_TRACING \
+              KSU KSU_KPROBE_HOOKS; do
+              printf '%s: ' "$option"
+              scripts/config --file out/.config --state "$option" || true
+            done
+
             exit 1
           fi
 
