@@ -1,5 +1,5 @@
 
-name: Xen-Kernel-KSUN - Legacy Kprobe Build
+name: Xen-Kernel-KSUN - Latest Manual Hook Build
 
 on:
   workflow_dispatch:
@@ -13,57 +13,20 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # 1. Checkout Xen-Kernel KSUN source
-      - name: Checkout Xen-Kernel-KSUN source
+      # 1. Checkout branch Manual Hook
+      - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16-KSUN"
+          ref: "16-KSUN_Manual_hook"
           fetch-depth: 1
           lfs: true
 
-      # 2. Integrate KernelSU Next legacy
-      - name: Integrate KernelSU Next Legacy
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=== Integrating KernelSU Next Legacy ==="
-
-          if [ -e KernelSU-Next ] || [ -e KernelSU ]; then
-            echo "::error::Existing KernelSU directory detected."
-            exit 1
-          fi
-
-          curl -fLSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-            -o /tmp/ksu-next-setup.sh
-
-          bash /tmp/ksu-next-setup.sh legacy
-
-          test -d KernelSU-Next/kernel
-          test -L drivers/kernelsu
-          test -f drivers/kernelsu/Kconfig
-
-          echo "=== KernelSU Next commit ==="
-          git -C KernelSU-Next rev-parse HEAD
-          git -C KernelSU-Next branch --show-current
-
-          echo "=== KernelSU hook definitions ==="
-          grep -n -A 24 -B 5 -E \
-            'KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK' \
-            KernelSU-Next/kernel/Kconfig || true
-
-          echo "=== KernelSU integration verified ==="
-          ls -ld drivers/kernelsu
-
-      # 3. Install build dependencies
+      # 2. Install build dependencies
       - name: Install build dependencies
         shell: bash
         run: |
           set -euo pipefail
-
           sudo apt-get update
-
           sudo apt-get install -y \
             bc bison build-essential ccache \
             clang flex git libelf-dev libssl-dev \
@@ -73,11 +36,292 @@ jobs:
             gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu \
             binutils-arm-linux-gnueabi \
-            libncurses-dev \
-            lz4 zip wget xz-utils file
+            libncurses-dev lz4 zip wget xz-utils file
 
-      # 4. Prepare the same Clang toolchain as the main branch
-      - name: Prepare upstream Clang
+      # 3. Download the official latest legacy integration
+      - name: Integrate latest KernelSU-Next legacy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Kernel source ==="
+          git log -1 --oneline
+          make kernelversion
+
+          test -f arch/arm64/configs/vayu_defconfig
+          test -f fs/exec.c
+          test -f fs/open.c
+          test -f fs/read_write.c
+          test -f fs/stat.c
+          test -f kernel/reboot.c
+
+          if [ -e KernelSU-Next ] || [ -e KernelSU ]; then
+            echo "::error::Existing KSUN directory found."
+            echo "Inspect the existing integration before continuing."
+            exit 1
+          fi
+
+          curl -fLSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            -o /tmp/ksun-setup.sh
+
+          bash /tmp/ksun-setup.sh legacy
+
+          echo "=== Locate KSUN source ==="
+          if [ -f KernelSU-Next/kernel/Kconfig ]; then
+            KSUN_DIR="KernelSU-Next"
+          elif [ -f KernelSU/kernel/Kconfig ]; then
+            KSUN_DIR="KernelSU"
+          else
+            echo "::error::Cannot locate integrated KSUN source."
+            find . -maxdepth 3 -iname Kconfig \
+              -path '*KernelSU*' -print
+            exit 1
+          fi
+
+          echo "KSUN_DIR=$KSUN_DIR" >> "$GITHUB_ENV"
+
+          echo "=== KSUN source identity ==="
+          if git -C "$KSUN_DIR" rev-parse HEAD; then
+            git -C "$KSUN_DIR" log -1 \
+              --format='commit=%H%n date=%cs%n subject=%s'
+          else
+            echo "::error::KSUN Git metadata unavailable."
+            exit 1
+          fi
+
+          echo "=== Integration entries ==="
+          ls -ld drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+          grep -n 'drivers/kernelsu/Kconfig' drivers/Kconfig
+          grep -n 'obj-$(CONFIG_KSU).*kernelsu' drivers/Makefile
+
+          echo "=== Available hook options ==="
+          grep -n -A 12 -B 3 \
+            -E 'KSU_KPROBE_HOOKS|KSU_KPROBES_HOOK|KSU_MANUAL_HOOK' \
+            "$KSUN_DIR/kernel/Kconfig" || true
+
+      # 4. Apply the official Manual Hook call pattern
+      - name: Apply Manual Hook patches
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def insert_unique(path, anchor, addition, marker):
+              p = Path(path)
+              text = p.read_text()
+
+              if marker in text:
+                  print(f"[EXISTS] {path}: {marker}")
+                  return
+
+              count = text.count(anchor)
+              if count != 1:
+                  raise SystemExit(
+                      f"Expected exactly one anchor in {path}, got {count}: "
+                      f"{anchor!r}"
+                  )
+
+              p.write_text(text.replace(anchor, addition + anchor, 1))
+              print(f"[PATCH] {path}: {marker}")
+
+          def patch_function(path, signature, anchor, addition, marker,
+                             before=True):
+              p = Path(path)
+              text = p.read_text()
+
+              if marker in text:
+                  print(f"[EXISTS] {path}: {marker}")
+                  return
+
+              start = text.find(signature)
+              if start < 0:
+                  raise SystemExit(
+                      f"Function signature not found in {path}: {signature!r}"
+                  )
+
+              brace = text.find("{", start)
+              if brace < 0:
+                  raise SystemExit(f"Opening brace missing in {path}")
+
+              depth = 0
+              end = None
+              for i in range(brace, len(text)):
+                  if text[i] == "{":
+                      depth += 1
+                  elif text[i] == "}":
+                      depth -= 1
+                      if depth == 0:
+                          end = i + 1
+                          break
+
+              if end is None:
+                  raise SystemExit(f"Function boundary missing in {path}")
+
+              body = text[start:end]
+              count = body.count(anchor)
+              if count != 1:
+                  raise SystemExit(
+                      f"Expected one anchor in {signature!r}, got {count}: "
+                      f"{anchor!r}"
+                  )
+
+              replacement = (
+                  addition + anchor if before else anchor + addition
+              )
+              body = body.replace(anchor, replacement, 1)
+              p.write_text(text[:start] + body + text[end:])
+              print(f"[PATCH] {path}: {marker}")
+
+          # fs/exec.c
+          insert_unique(
+              "fs/exec.c",
+              "int do_execve(struct filename *filename,",
+              "#ifdef CONFIG_KSU\n"
+              "__attribute__((hot))\n"
+              "extern int ksu_handle_execveat(int *fd, "
+              "struct filename **filename_ptr,\n"
+              "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
+              "#endif\n\n",
+              "extern int ksu_handle_execveat"
+          )
+
+          patch_function(
+              "fs/exec.c",
+              "int do_execve(struct filename *filename,",
+              "return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);",
+              "\n#ifdef CONFIG_KSU\n"
+              "\tksu_handle_execveat((int *)AT_FDCWD, "
+              "&filename, &argv, &envp, 0);\n"
+              "#endif\n\t",
+              "ksu_handle_execveat((int *)AT_FDCWD"
+          )
+
+          patch_function(
+              "fs/exec.c",
+              "static int compat_do_execve(struct filename *filename,",
+              "return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);",
+              "\n#ifdef CONFIG_KSU\n"
+              "\tksu_handle_execveat((int *)AT_FDCWD, "
+              "&filename, &argv, &envp, 0);\n"
+              "#endif\n\t",
+              "ksu_handle_execveat((int *)AT_FDCWD"
+          )
+
+          # fs/open.c
+          insert_unique(
+              "fs/open.c",
+              "/*\n * access() needs to use the real uid/gid",
+              "#ifdef CONFIG_KSU\n"
+              "__attribute__((hot))\n"
+              "extern int ksu_handle_faccessat(int *dfd, "
+              "const char __user **filename_user,\n"
+              "\t\t\t\tint *mode, int *flags);\n"
+              "#endif\n\n",
+              "extern int ksu_handle_faccessat"
+          )
+
+          patch_function(
+              "fs/open.c",
+              "SYSCALL_DEFINE3(faccessat, int, dfd,",
+              "if (mode & ~S_IRWXO)",
+              "\n#ifdef CONFIG_KSU\n"
+              "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+              "#endif\n\n\t",
+              "ksu_handle_faccessat(&dfd"
+          )
+
+          # fs/read_write.c
+          insert_unique(
+              "fs/read_write.c",
+              "SYSCALL_DEFINE3(read, unsigned int, fd,",
+              "#ifdef CONFIG_KSU\n"
+              "extern bool ksu_vfs_read_hook __read_mostly;\n"
+              "extern __attribute__((cold)) int ksu_handle_sys_read("
+              "unsigned int fd,\n"
+              "\t\t\t\tchar __user **buf_ptr, size_t *count_ptr);\n"
+              "#endif\n\n",
+              "extern bool ksu_vfs_read_hook"
+          )
+
+          patch_function(
+              "fs/read_write.c",
+              "SYSCALL_DEFINE3(read, unsigned int, fd,",
+              "ssize_t ret = -EBADF;",
+              "\n#ifdef CONFIG_KSU\n"
+              "\tif (unlikely(ksu_vfs_read_hook))\n"
+              "\t\tksu_handle_sys_read(fd, &buf, &count);\n"
+              "#endif\n",
+              "ksu_handle_sys_read(fd, &buf, &count)",
+              before=False
+          )
+
+          # fs/stat.c
+          insert_unique(
+              "fs/stat.c",
+              "#if !defined(__ARCH_WANT_STAT64) || "
+              "defined(__ARCH_WANT_SYS_NEWFSTATAT)",
+              "#ifdef CONFIG_KSU\n"
+              "__attribute__((hot))\n"
+              "extern int ksu_handle_stat(int *dfd, "
+              "const char __user **filename_user,\n"
+              "\t\t\t\tint *flags);\n"
+              "#endif\n\n",
+              "extern int ksu_handle_stat"
+          )
+
+          patch_function(
+              "fs/stat.c",
+              "SYSCALL_DEFINE4(newfstatat, int, dfd,",
+              "error = vfs_fstatat(dfd, filename, &stat, flag);",
+              "#ifdef CONFIG_KSU\n"
+              "\tksu_handle_stat(&dfd, &filename, &flag);\n"
+              "#endif\n\t",
+              "ksu_handle_stat(&dfd"
+          )
+
+          # kernel/reboot.c
+          insert_unique(
+              "kernel/reboot.c",
+              "SYSCALL_DEFINE4(reboot, int, magic1,",
+              "#ifdef CONFIG_KSU\n"
+              "extern int ksu_handle_sys_reboot(int magic1, int magic2, "
+              "unsigned int cmd, void __user **arg);\n"
+              "#endif\n\n",
+              "extern int ksu_handle_sys_reboot"
+          )
+
+          patch_function(
+              "kernel/reboot.c",
+              "SYSCALL_DEFINE4(reboot, int, magic1,",
+              "int ret = 0;",
+              "\n#ifdef CONFIG_KSU\n"
+              "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+              "#endif\n",
+              "ksu_handle_sys_reboot(magic1",
+              before=False
+          )
+
+          print("Manual Hook insertion pass complete.")
+          PY
+
+          echo "=== Verify Manual Hook call sites ==="
+          grep -n 'ksu_handle_execveat' fs/exec.c
+          grep -n 'ksu_handle_faccessat' fs/open.c
+          grep -n 'ksu_handle_sys_read' fs/read_write.c
+          grep -n 'ksu_handle_stat' fs/stat.c
+          grep -n 'ksu_handle_sys_reboot' kernel/reboot.c
+
+          git diff --check
+          git diff -- fs/exec.c fs/open.c fs/read_write.c \
+            fs/stat.c kernel/reboot.c > manual-hook.patch
+
+      # 5. Prepare Clang
+      - name: Prepare Clang toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -89,47 +333,11 @@ jobs:
             "$HOME/clang"
 
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
-
-          echo "=== Clang version ==="
-          "$HOME/clang/bin/clang" --version
-
-          echo "=== LLD version ==="
-          "$HOME/clang/bin/ld.lld" --version
-
-          echo "=== LLVM archiver ==="
-          "$HOME/clang/bin/llvm-ar" --version
-
-      # 5. Validate source and toolchains
-      - name: Check source and toolchains
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "=== Kernel source commit ==="
-          git log -1 --oneline
-
-          echo "=== Kernel version ==="
-          make kernelversion
-
-          echo "=== Required source files ==="
-          test -f Makefile
-          test -f arch/arm64/Makefile
-          test -f arch/arm64/configs/vayu_defconfig
-          test -f scripts/config
-
-          echo "=== GCC64 ==="
-          aarch64-linux-gnu-gcc --version
-
-          echo "=== GCC32 ==="
-          arm-linux-gnueabi-gcc --version
-
-          echo "=== LLVM tools ==="
           "$HOME/clang/bin/clang" --version
           "$HOME/clang/bin/ld.lld" --version
-          "$HOME/clang/bin/llvm-ar" --version
 
-      # 6. Configure KernelSU Next Kprobe
-      - name: Configure KernelSU Next Kprobe
+      # 6. Configure Manual Hook
+      - name: Configure KernelSU-Next Manual Hook
         shell: bash
         run: |
           set -euo pipefail
@@ -140,93 +348,50 @@ jobs:
 
           exec > >(tee config.log) 2>&1
 
-          echo "=== Generate vayu_defconfig ==="
           make ARCH=arm64 O=out vayu_defconfig
 
-          echo "=== Enable required base options ==="
           scripts/config --file out/.config --enable MODULES
-          scripts/config --file out/.config --enable KPROBES
-          scripts/config --file out/.config --enable KRETPROBES
           scripts/config --file out/.config --enable KSU
 
-          echo "=== Select KernelSU Next hook mode ==="
-          scripts/config --file out/.config --disable KSU_MANUAL_HOOK
-          scripts/config --file out/.config --enable KSU_KPROBES_HOOK
+          # Current official docs call the automatic option
+          # KSU_KPROBE_HOOKS. Disable known spellings if present.
+          for symbol in KSU_KPROBE_HOOKS KSU_KPROBES_HOOK; do
+            if grep -Rq "config $symbol" \
+              "$KSUN_DIR/kernel"; then
+              scripts/config --file out/.config --disable "$symbol"
+            fi
+          done
 
-          echo "=== Set Xen-Kernel version suffix ==="
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen-KSUN"
+            --set-str LOCALVERSION "-Xen-KSUN-Manual"
 
           scripts/config --file out/.config \
             --disable LOCALVERSION_AUTO
 
-          echo "=== Resolve Kconfig dependencies ==="
           make ARCH=arm64 O=out olddefconfig
 
-          echo "=== Final relevant configuration ==="
+          echo "=== Relevant final config ==="
           grep -E \
-            '^(CONFIG_(MODULES|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KPROBES|KRETPROBES|HAVE_KPROBES|HAVE_SYSCALL_TRACEPOINTS|KPROBE_EVENTS|PERF_EVENTS|TRACING|TRACEPOINTS|EVENT_TRACING)=|# CONFIG_(MODULES|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK|KPROBES|KRETPROBES|KPROBE_EVENTS) is not set)' \
+            '^(CONFIG_(MODULES|KSU|KSU_KPROBE_HOOKS|KSU_KPROBES_HOOK)=|# CONFIG_(KSU_KPROBE_HOOKS|KSU_KPROBES_HOOK) is not set)' \
             out/.config || true
 
-          echo "=== Hook definitions in source ==="
-          grep -n -A 24 -B 5 -E \
-            'KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK' \
-            KernelSU-Next/kernel/Kconfig || true
+          grep -qx 'CONFIG_KSU=y' out/.config || {
+            echo "::error::CONFIG_KSU=y is missing."
+            exit 1
+          }
 
-          echo "=== Kprobe definitions in kernel ==="
-          grep -n -A 12 -B 5 -E \
-            'config KPROBES|config KRETPROBES|config KPROBE_EVENTS|HAVE_SYSCALL_TRACEPOINTS|HAVE_REGS_AND_STACK_ACCESS_API' \
-            kernel/trace/Kconfig kernel/Kconfig arch/arm64/Kconfig \
-            2>/dev/null || true
-
-          echo "=== Validate required configuration ==="
-          failed=0
-
-          for option in MODULES KSU KPROBES KRETPROBES; do
-            if ! grep -qx "CONFIG_${option}=y" out/.config; then
-              echo "::error::CONFIG_${option} is not enabled after olddefconfig."
-              failed=1
-            else
-              echo "CONFIG_${option}=y [OK]"
-            fi
-          done
-
-          if ! grep -qx \
-            'CONFIG_KSU_KPROBES_HOOK=y' out/.config; then
-            echo "::error::CONFIG_KSU_KPROBES_HOOK is not enabled."
-            echo "The KSUN hook choice or one of its dependencies is unavailable."
-            failed=1
-          else
-            echo "CONFIG_KSU_KPROBES_HOOK=y [OK]"
-          fi
-
-          if grep -qx \
-            'CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
-            echo "::error::Manual hook mode is active instead of Kprobe mode."
-            failed=1
-          fi
-
-          if [ "$failed" -ne 0 ]; then
-            echo "=== Configuration diagnostic summary ==="
-            grep -E \
-              'KSU|KPROBE|KRETPROBE|SYSCALL_TRACEPOINTS|MODULES|TRACING' \
-              out/.config || true
+          if grep -Eq \
+            '^CONFIG_(KSU_KPROBE_HOOKS|KSU_KPROBES_HOOK)=y$' \
+            out/.config; then
+            echo "::error::Kprobes hook remains enabled."
             exit 1
           fi
 
-          echo "=== Save validated configuration ==="
           cp out/.config baseline.config
-
-          echo "=== Kernel version ==="
-          make kernelversion
-
-          echo "=== Kernel release ==="
           make ARCH=arm64 O=out kernelrelease
 
-          grep '^CONFIG_LOCALVERSION=' out/.config
-
-      # 7. Compile Xen-Kernel KSUN
-      - name: Compile kernel
+      # 7. Compile kernel
+      - name: Compile Xen-Kernel
         shell: bash
         run: |
           set -euo pipefail
@@ -262,39 +427,32 @@ jobs:
             CC="ccache clang" \
             2>&1 | tee build.log
 
-      # 8. Verify build output
-      - name: Verify kernel image
+      # 8. Verify outputs
+      - name: Verify kernel output
         if: success()
         shell: bash
         run: |
           set -euo pipefail
 
           IMAGE="out/arch/arm64/boot/Image"
+          test -s "$IMAGE"
 
-          if [ ! -s "$IMAGE" ]; then
-            echo "::error::Kernel Image not found or empty."
-            exit 1
-          fi
-
-          echo "=== Kernel image ==="
           file "$IMAGE"
           ls -lh "$IMAGE"
-
-          echo "=== Kernel release ==="
           make ARCH=arm64 O=out kernelrelease
 
-          echo "=== Available build outputs ==="
-          find out/arch/arm64/boot \
-            -maxdepth 2 -type f \
-            \( -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" \) \
-            -print
+          echo "=== KernelSU source revision ==="
+          git -C "$KSUN_DIR" rev-parse HEAD
 
-      # 9. Upload successful build artifacts
-      - name: Upload Xen-Kernel-KSUN artifacts
+          echo "=== Manual Hook patch ==="
+          cat manual-hook.patch
+
+      # 9. Upload successful artifacts
+      - name: Upload Xen-Kernel Manual Hook artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KSUN-legacy-kprobe
+          name: Xen-Kernel-KSUN-Latest-Manual-Hook
           if-no-files-found: error
           path: |
             out/arch/arm64/boot/Image
@@ -305,16 +463,18 @@ jobs:
             baseline.config
             config.log
             build.log
+            manual-hook.patch
 
       # 10. Upload diagnostics on failure
       - name: Upload diagnostics on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KSUN-diagnostics
+          name: Xen-Kernel-KSUN-Latest-Manual-Hook-diagnostics
           if-no-files-found: warn
           path: |
             config.log
             build.log
             baseline.config
             out/.config
+            manual-hook.patch
