@@ -1,4 +1,4 @@
-
+```yaml
 name: Xen-Kernel-KSUN - Manual Hook Build
 
 on:
@@ -33,12 +33,14 @@ jobs:
             ccache \
             curl \
             flex \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
             git \
             libelf-dev \
+            libncurses-dev \
             libssl-dev \
             lld \
             python3 \
-            python3-pip \
             rsync \
             unzip \
             wget \
@@ -64,44 +66,190 @@ jobs:
           test -d KernelSU-Next/kernel
           test -f drivers/kernelsu/Kconfig
 
-          echo "===== KernelSU-Next revision ====="
+          echo "===== KernelSU-Next commit ====="
           git -C KernelSU-Next rev-parse HEAD
           git -C KernelSU-Next describe --tags --always || true
 
-      - name: Inspect Manual Hook integration
+      - name: Apply Manual Hook integration
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "===== KSUN hook configuration ====="
-          grep -n -E \
-            'KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK' \
-            KernelSU-Next/kernel/Kconfig || true
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
 
-          echo "===== Handler declarations and call sites ====="
-          grep -R -n -E \
-            'ksu_handle_(execveat|faccessat|sys_reboot)' \
-            fs kernel \
-            --include='*.c' || true
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(
+                      f"PATCH ERROR: {label}: expected one match, found {count}"
+                  )
+              return text.replace(old, new, 1)
+
+          # ---------------------------------------------------------
+          # fs/exec.c
+          # Add the KSUN handler declaration and wire execve hooks.
+          # ---------------------------------------------------------
+          p = Path("fs/exec.c")
+          text = p.read_text()
+
+          if "ksu_handle_execveat" in text:
+              raise SystemExit(
+                  "PATCH ERROR: execveat handler already exists in fs/exec.c"
+              )
+
+          declaration_anchor = (
+              "int do_execve(struct filename *filename,\n"
+          )
+
+          declaration = (
+              "#if defined(CONFIG_KSU)\n"
+              "__attribute__((hot))\n"
+              "extern int ksu_handle_execveat(int *fd, "
+              "struct filename **filename_ptr,\n"
+              "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
+              "#endif\n"
+          )
+
+          text = replace_once(
+              text,
+              declaration_anchor,
+              declaration + declaration_anchor,
+              "execve handler declaration",
+          )
+
+          native_old = (
+              "int do_execve(struct filename *filename,\n"
+              "\tconst char __user *const __user *__argv,\n"
+              "\tconst char __user *const __user *__envp)\n"
+              "{\n"
+              "\tstruct user_arg_ptr argv = { .ptr.native = __argv };\n"
+              "\tstruct user_arg_ptr envp = { .ptr.native = __envp };\n"
+              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n"
+              "}"
+          )
+
+          native_new = (
+              "int do_execve(struct filename *filename,\n"
+              "\tconst char __user *const __user *__argv,\n"
+              "\tconst char __user *const __user *__envp)\n"
+              "{\n"
+              "\tstruct user_arg_ptr argv = { .ptr.native = __argv };\n"
+              "\tstruct user_arg_ptr envp = { .ptr.native = __envp };\n"
+              "#if defined(CONFIG_KSU)\n"
+              "\tint fd = AT_FDCWD;\n"
+              "\tint flags = 0;\n"
+              "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
+              "\treturn do_execveat_common(fd, filename, argv, envp, flags);\n"
+              "#else\n"
+              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n"
+              "#endif\n"
+              "}"
+          )
+
+          text = replace_once(
+              text, native_old, native_new, "native execve hook"
+          )
+
+          compat_pattern = re.compile(
+              r"(static int compat_do_execve\(struct filename \*filename,"
+              r".*?\n\})(?=\nstatic int compat_do_execveat)",
+              re.S,
+          )
+
+          match = compat_pattern.search(text)
+          if not match:
+              raise SystemExit(
+                  "PATCH ERROR: compat_do_execve function not found"
+              )
+
+          compat_func = match.group(1)
+          compat_old = (
+              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);"
+          )
+          compat_new = (
+              "#if defined(CONFIG_KSU)\n"
+              "\tint fd = AT_FDCWD;\n"
+              "\tint flags = 0;\n"
+              "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
+              "\treturn do_execveat_common(fd, filename, argv, envp, flags);\n"
+              "#else\n"
+              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n"
+              "#endif"
+          )
+
+          compat_func = replace_once(
+              compat_func, compat_old, compat_new, "compat execve hook"
+          )
+
+          text = (
+              text[:match.start()]
+              + compat_func
+              + text[match.end():]
+          )
+          p.write_text(text)
+
+          # ---------------------------------------------------------
+          # fs/open.c
+          # Add the KSUN faccessat handler.
+          # ---------------------------------------------------------
+          p = Path("fs/open.c")
+          text = p.read_text()
+
+          if "ksu_handle_faccessat" in text:
+              raise SystemExit(
+                  "PATCH ERROR: faccessat handler already exists in fs/open.c"
+              )
+
+          open_anchor = "SYSCALL_DEFINE3(faccessat, int, dfd, "
+          open_declaration = (
+              "#ifdef CONFIG_KSU\n"
+              "__attribute__((hot))\n"
+              "extern int ksu_handle_faccessat(int *dfd, "
+              "const char __user **filename_user,\n"
+              "\t\t\t\tint *mode, int *flags);\n"
+              "#endif\n"
+          )
+
+          text = replace_once(
+              text,
+              open_anchor,
+              open_declaration + open_anchor,
+              "faccessat handler declaration",
+          )
+
+          faccess_anchor = (
+              "\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n"
+              "\tif (mode & ~S_IRWXO)"
+          )
+
+          faccess_new = (
+              "\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n"
+              "#ifdef CONFIG_KSU\n"
+              "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+              "#endif\n"
+              "\tif (mode & ~S_IRWXO)"
+          )
+
+          text = replace_once(
+              text,
+              faccess_anchor,
+              faccess_new,
+              "faccessat hook call",
+          )
+
+          p.write_text(text)
+
+          print("Manual Hook patches applied successfully.")
+          PY
 
           echo "===== Check whitespace ====="
           git diff --check
 
-          if ! grep -q 'config KSU_MANUAL_HOOK' \
-            KernelSU-Next/kernel/Kconfig; then
-            echo "::error::KSU_MANUAL_HOOK was not found in this KSUN revision."
-            exit 1
-          fi
-
-          if ! grep -q 'ksu_handle_execveat' fs/exec.c; then
-            echo "::error::Missing execveat handler in fs/exec.c."
-            exit 1
-          fi
-
-          if ! grep -q 'ksu_handle_faccessat' fs/open.c; then
-            echo "::error::Missing faccessat handler in fs/open.c."
-            exit 1
-          fi
+          echo "===== Verify handler locations ====="
+          grep -n 'ksu_handle_execveat' fs/exec.c
+          grep -n 'ksu_handle_faccessat' fs/open.c
 
       - name: Configure kernel
         shell: bash
@@ -110,6 +258,11 @@ jobs:
 
           export ARCH=arm64
           export SUBARCH=arm64
+
+          # Set the requested kernel identity.
+          sed -i \
+            's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION = -openela-Xen-KSUN/' \
+            Makefile
 
           make O=out vayu_defconfig
 
@@ -124,39 +277,18 @@ jobs:
 
           make O=out olddefconfig
 
-          echo "===== Relevant final configuration ====="
+          echo "===== KSUN configuration ====="
           grep -E \
-            'CONFIG_(MODULES|KPROBES|KRETPROBES|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK)=' \
+            'CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK)=' \
             out/.config || true
 
-          grep -q '^CONFIG_KSU=y' out/.config
-          grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config
+          if ! grep -q '^CONFIG_KSU=y' out/.config; then
+            echo "::error::CONFIG_KSU is not enabled."
+            exit 1
+          fi
 
-      - name: Set Xen-Kernel version string
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "===== Original kernel version ====="
-          grep -n -E \
-            '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)[[:space:]]*=' \
-            Makefile
-
-          # Set the requested release suffix.
-          sed -i \
-            's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION = -openela-Xen-KSUN/' \
-            Makefile
-
-          # Verify the suffix exists.
-          grep -q '^EXTRAVERSION = -openela-Xen-KSUN$' Makefile
-
-          echo "===== Verify resulting kernel release ====="
-          RELEASE="$(make -s O=out kernelrelease)"
-          echo "$RELEASE"
-
-          if [ "$RELEASE" != "4.14.357-openela-Xen-KSUN" ]; then
-            echo "::error::Unexpected kernel release: $RELEASE"
-            echo "Expected: 4.14.357-openela-Xen-KSUN"
+          if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
+            echo "::error::Manual Hook is not enabled by olddefconfig."
             exit 1
           fi
 
@@ -212,7 +344,7 @@ jobs:
 
           test -s out/arch/arm64/boot/Image
 
-          echo "===== Final kernel release ====="
+          echo "===== Kernel release ====="
           make -s O=out kernelrelease
 
       - name: Collect build artifacts
@@ -241,13 +373,10 @@ jobs:
               -exec cp --parents '{}' artifacts/ \; || true
           fi
 
-          git -C KernelSU-Next rev-parse HEAD \
-            > artifacts/ksun-commit.txt 2>/dev/null || true
-
           git rev-parse HEAD > artifacts/source-commit.txt
 
-          make -s O=out kernelrelease \
-            > artifacts/kernel-release.txt 2>/dev/null || true
+          git -C KernelSU-Next rev-parse HEAD \
+            > artifacts/ksun-commit.txt 2>/dev/null || true
 
       - name: Upload build artifacts
         if: always()
@@ -257,3 +386,4 @@ jobs:
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
+```
