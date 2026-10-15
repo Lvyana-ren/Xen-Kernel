@@ -1,5 +1,5 @@
 
-name: Xen-Kernel-KSUN - Anymore Integration
+name: Xen-Kernel KSUN Manual Hook
 
 on:
   workflow_dispatch:
@@ -13,14 +13,12 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      # ------------------------------------------------------
-      # 1. Source Xen-Kernel
-      # ------------------------------------------------------
-      - name: Checkout Xen-Kernel
+      - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16-KSUN_Manual_hook"
+          ref: 16-KSUN_Manual_hook
           fetch-depth: 1
+          lfs: true
 
       - name: Install build dependencies
         shell: bash
@@ -49,307 +47,49 @@ jobs:
             zip \
             device-tree-compiler
 
-      # ------------------------------------------------------
-      # 2. Get the exact KSUN commit used by Anymore
-      # ------------------------------------------------------
-      - name: Resolve Anymore KernelSU-Next revision
-        id: ksun
+      - name: Install official KernelSU-Next Legacy source
         shell: bash
         run: |
           set -euo pipefail
 
-          git clone \
-            --filter=blob:none \
-            --no-checkout \
-            --depth=1 \
-            --branch 16-ksun \
-            https://github.com/AnymoreProject/android_kernel_vayu.git \
-            /tmp/anymore-reference
-
-          KSUN_SHA="$(
-            git -C /tmp/anymore-reference \
-              ls-tree HEAD KernelSU-Next |
-              awk '$2 == "commit" { print $3 }'
-          )"
-
-          if [ -z "$KSUN_SHA" ]; then
-            echo "::error::Cannot resolve Anymore KernelSU-Next submodule commit."
+          if [ -e KernelSU-Next ] || [ -e KernelSU ]; then
+            echo "::error::A KernelSU source directory already exists."
+            echo "Check the current source tree before continuing."
             exit 1
           fi
-
-          echo "KSUN_SHA=$KSUN_SHA" >> "$GITHUB_ENV"
-          echo "Anymore KSUN revision: $KSUN_SHA"
-
-      - name: Install pinned KernelSU-Next
-        shell: bash
-        run: |
-          set -euo pipefail
 
           curl -fL --retry 3 \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${KSUN_SHA}/kernel/setup.sh" \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             -o /tmp/ksun-setup.sh
 
-          bash /tmp/ksun-setup.sh "$KSUN_SHA"
+          bash /tmp/ksun-setup.sh legacy
 
           test -d KernelSU-Next/kernel
-          test -L drivers/kernelsu
+          test -e drivers/kernelsu
 
-          ACTUAL_SHA="$(git -C KernelSU-Next rev-parse HEAD)"
+          echo "===== Installed KernelSU-Next revision ====="
+          git -C KernelSU-Next rev-parse HEAD
+          git -C KernelSU-Next describe --tags --always || true
 
-          echo "Requested KSUN: $KSUN_SHA"
-          echo "Installed KSUN: $ACTUAL_SHA"
-
-          if [ "$ACTUAL_SHA" != "$KSUN_SHA" ]; then
-            echo "::error::Installed KSUN does not match Anymore revision."
-            exit 1
-          fi
-
-          echo "===== KSUN revision verified ====="
-
-      # ------------------------------------------------------
-      # 3. Apply Anymore-style source integration
-      # ------------------------------------------------------
-      - name: Apply Anymore KSUN hooks
+      - name: Apply Xen-Kernel Manual Hook integration
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 - <<'PY'
-          from pathlib import Path
+          test -f scripts/apply-ksun-manual-hooks.py
 
-          def replace_once(text, old, new, label):
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(
-                      f"PATCH ERROR: {label}: "
-                      f"expected 1 match, found {count}"
-                  )
-              return text.replace(old, new, 1)
+          python3 scripts/apply-ksun-manual-hooks.py
 
-          def patch_function(text, start_marker, end_marker,
-                             old, new, label):
-              start = text.find(start_marker)
-
-              if start < 0:
-                  raise SystemExit(
-                      f"PATCH ERROR: start of {label} not found"
-                  )
-
-              end = text.find(
-                  end_marker,
-                  start + len(start_marker)
-              )
-
-              if end < 0:
-                  raise SystemExit(
-                      f"PATCH ERROR: end of {label} not found"
-                  )
-
-              body = text[start:end]
-              body = replace_once(body, old, new, label)
-
-              return text[:start] + body + text[end:]
-
-          # ==================================================
-          # fs/exec.c
-          # Match Anymore's do_execve/compat_do_execve calls.
-          # ==================================================
-          p = Path("fs/exec.c")
-          text = p.read_text()
-
-          if "ksu_handle_execveat" in text:
-              raise SystemExit(
-                  "PATCH ERROR: execve hook already exists"
-              )
-
-          declaration = (
-              "#if defined(CONFIG_KSU)\n"
-              "__attribute__((hot))\n"
-              "extern int ksu_handle_execveat(int *fd, "
-              "struct filename **filename_ptr,\n"
-              "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
-              "#endif\n"
-          )
-
-          native_start = (
-              "int do_execve(struct filename *filename,"
-          )
-
-          text = replace_once(
-              text,
-              native_start,
-              declaration + native_start,
-              "execve handler declaration",
-          )
-
-          exec_call = (
-              "#if defined(CONFIG_KSU)\n"
-              "\tksu_handle_execveat((int *)AT_FDCWD, "
-              "&filename, &argv, &envp, 0);\n"
-              "#endif\n"
-              "\treturn do_execveat_common("
-              "AT_FDCWD, filename, argv, envp, 0);"
-          )
-
-          text = patch_function(
-              text,
-              native_start,
-              "\nint do_execveat(",
-              "\treturn do_execveat_common("
-              "AT_FDCWD, filename, argv, envp, 0);",
-              exec_call,
-              "do_execve hook",
-          )
-
-          compat_start = (
-              "static int compat_do_execve("
-              "struct filename *filename,"
-          )
-
-          compat_call = (
-              "#if defined(CONFIG_KSU)\n"
-              "\tksu_handle_execveat((int *)AT_FDCWD, "
-              "&filename, &argv, &envp, 0);\n"
-              "#endif\n"
-              "\treturn do_execveat_common("
-              "AT_FDCWD, filename, argv, envp, 0);"
-          )
-
-          text = patch_function(
-              text,
-              compat_start,
-              "\nstatic int compat_do_execveat(",
-              "\treturn do_execveat_common("
-              "AT_FDCWD, filename, argv, envp, 0);",
-              compat_call,
-              "compat_do_execve hook",
-          )
-
-          p.write_text(text)
-
-          # ==================================================
-          # fs/open.c
-          # ==================================================
-          p = Path("fs/open.c")
-          text = p.read_text()
-
-          if "ksu_handle_faccessat" in text:
-              raise SystemExit(
-                  "PATCH ERROR: faccessat hook already exists"
-              )
-
-          open_start = (
-              "SYSCALL_DEFINE3(faccessat, int, dfd, "
-              "const char __user *, filename, int, mode)"
-          )
-
-          open_declaration = (
-              "#ifdef CONFIG_KSU\n"
-              "__attribute__((hot))\n"
-              "extern int ksu_handle_faccessat(int *dfd, "
-              "const char __user **filename_user,\n"
-              "\t\t\t\tint *mode, int *flags);\n"
-              "#endif\n"
-          )
-
-          text = replace_once(
-              text,
-              open_start,
-              open_declaration + open_start,
-              "faccessat handler declaration",
-          )
-
-          faccess_call = (
-              "\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n"
-              "#ifdef CONFIG_KSU\n"
-              "\tksu_handle_faccessat(&dfd, &filename, "
-              "&mode, NULL);\n"
-              "#endif\n"
-          )
-
-          text = patch_function(
-              text,
-              open_start,
-              "\nSYSCALL_DEFINE2(access,",
-              "\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n",
-              faccess_call,
-              "faccessat hook",
-          )
-
-          p.write_text(text)
-
-          # ==================================================
-          # kernel/reboot.c
-          # ==================================================
-          p = Path("kernel/reboot.c")
-          text = p.read_text()
-
-          if "ksu_handle_sys_reboot" in text:
-              raise SystemExit(
-                  "PATCH ERROR: reboot hook already exists"
-              )
-
-          reboot_start = (
-              "SYSCALL_DEFINE4(reboot, int, magic1, "
-              "int, magic2, unsigned int, cmd,"
-          )
-
-          reboot_declaration = (
-              "#ifdef CONFIG_KSU\n"
-              "extern int ksu_handle_sys_reboot("
-              "int magic1, int magic2, unsigned int cmd, "
-              "void __user **arg);\n"
-              "#endif\n"
-          )
-
-          text = replace_once(
-              text,
-              reboot_start,
-              reboot_declaration + reboot_start,
-              "reboot handler declaration",
-          )
-
-          reboot_old = (
-              "\tchar buffer[256];\n"
-              "\tint ret = 0;\n"
-          )
-
-          reboot_new = (
-              "\tchar buffer[256];\n"
-              "\tint ret = 0;\n"
-              "#ifdef CONFIG_KSU\n"
-              "\tksu_handle_sys_reboot("
-              "magic1, magic2, cmd, &arg);\n"
-              "#endif\n"
-          )
-
-          text = replace_once(
-              text,
-              reboot_old,
-              reboot_new,
-              "reboot hook",
-          )
-
-          p.write_text(text)
-
-          print("Anymore-style KSUN integration applied.")
-          PY
-
-          echo "===== Whitespace validation ====="
-          git diff --check
-
-          echo "===== Verify hook declarations and calls ====="
+          echo "===== Verify all five hooks ====="
           grep -n 'ksu_handle_execveat' fs/exec.c
           grep -n 'ksu_handle_faccessat' fs/open.c
+          grep -n 'ksu_handle_sys_read\|ksu_vfs_read_hook' fs/read_write.c
+          grep -n 'ksu_handle_stat' fs/stat.c
           grep -n 'ksu_handle_sys_reboot' kernel/reboot.c
 
-          echo "===== Modified files ====="
-          git diff --stat
+          git diff --check
 
-      # ------------------------------------------------------
-      # 4. Kernel configuration
-      # ------------------------------------------------------
-      - name: Configure vayu kernel
+      - name: Configure kernel
         shell: bash
         run: |
           set -euo pipefail
@@ -361,7 +101,31 @@ jobs:
             's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION = -openela-Xen-KSUN/' \
             Makefile
 
-          make O=out vayu_defconfig
+          # Find the actual vayu defconfig in this source tree.
+          DEFCONFIG_PATH=""
+
+          for candidate in \
+            arch/arm64/configs/vayu_defconfig \
+            arch/arm64/configs/vayu_user_defconfig \
+            arch/arm64/configs/vendor/vayu_user_defconfig
+          do
+            if [ -f "$candidate" ]; then
+              DEFCONFIG_PATH="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$DEFCONFIG_PATH" ]; then
+            echo "::error::No known vayu defconfig was found."
+            echo "Available vayu configs:"
+            find arch/arm64/configs -type f -iname '*vayu*' -print || true
+            exit 1
+          fi
+
+          DEFCONFIG="${DEFCONFIG_PATH#arch/arm64/configs/}"
+          echo "Using defconfig: $DEFCONFIG"
+
+          make O=out "$DEFCONFIG"
 
           scripts/config --file out/.config \
             --enable MODULES \
@@ -373,25 +137,22 @@ jobs:
 
           make O=out olddefconfig
 
-          echo "===== KSUN config ====="
+          echo "===== Effective KSUN configuration ====="
           grep -E \
             'CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK)=' \
             out/.config || true
 
-          grep -q '^CONFIG_KSU=y' out/.config || {
-            echo "::error::CONFIG_KSU is not enabled"
+          if ! grep -q '^CONFIG_KSU=y' out/.config; then
+            echo "::error::CONFIG_KSU is not enabled."
             exit 1
-          }
+          fi
 
-          grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config || {
-            echo "::error::Manual Hook is not enabled"
+          if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
+            echo "::error::Manual Hook is not enabled."
             exit 1
-          }
+          fi
 
-      # ------------------------------------------------------
-      # 5. Clang toolchain
-      # ------------------------------------------------------
-      - name: Download Clang
+      - name: Download Clang toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -407,9 +168,6 @@ jobs:
           test -x clang/bin/clang
           clang/bin/clang --version
 
-      # ------------------------------------------------------
-      # 6. Compile
-      # ------------------------------------------------------
       - name: Build Xen-Kernel
         shell: bash
         run: |
@@ -421,6 +179,8 @@ jobs:
           export CC=clang
           export LLVM=1
           export LLVM_IAS=1
+
+          mkdir -p out
 
           set +e
           make -j"$(nproc)" \
@@ -437,7 +197,7 @@ jobs:
           set -e
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo "::error::Kernel build failed"
+            echo "::error::Kernel compilation failed."
             exit "$BUILD_STATUS"
           fi
 
@@ -446,10 +206,7 @@ jobs:
           echo "===== Kernel release ====="
           make -s O=out kernelrelease
 
-      # ------------------------------------------------------
-      # 7. Upload artifacts even if compilation fails
-      # ------------------------------------------------------
-      - name: Collect artifacts
+      - name: Collect build artifacts
         if: always()
         shell: bash
         run: |
@@ -463,6 +220,18 @@ jobs:
           [ ! -f out/arch/arm64/boot/Image ] || \
             cp out/arch/arm64/boot/Image artifacts/
 
+          [ ! -f out/arch/arm64/boot/Image.gz ] || \
+            cp out/arch/arm64/boot/Image.gz artifacts/
+
+          [ ! -f out/arch/arm64/boot/Image.gz-dtb ] || \
+            cp out/arch/arm64/boot/Image.gz-dtb artifacts/
+
+          if [ -d out/arch/arm64/boot/dts ]; then
+            find out/arch/arm64/boot/dts \
+              -type f -name '*.dtb' \
+              -exec cp --parents '{}' artifacts/ \; || true
+          fi
+
           git rev-parse HEAD > artifacts/source-commit.txt
 
           if [ -d KernelSU-Next/.git ]; then
@@ -470,11 +239,14 @@ jobs:
               > artifacts/ksun-commit.txt
           fi
 
-      - name: Upload artifacts
+          make -s O=out kernelrelease \
+            > artifacts/kernel-release.txt 2>&1 || true
+
+      - name: Upload build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KSUN-Anymore
+          name: Xen-Kernel-KSUN-Manual-Hook
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
