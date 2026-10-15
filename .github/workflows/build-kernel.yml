@@ -21,46 +21,44 @@ jobs:
           lfs: true
 
       - name: Integrate KernelSU Next Legacy
+        shell: bash
         run: |
           set -euo pipefail
 
           echo "=== Integrating KernelSU Next Legacy ==="
 
-          if [ -d "KernelSU-Next" ] || [ -d "KernelSU" ]; then
+          if [ -d KernelSU-Next ] || [ -d KernelSU ]; then
             echo "::error::Existing KernelSU directory detected."
             exit 1
           fi
 
           curl -fLSs \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh \
             -o /tmp/ksu-next-setup.sh
 
           bash /tmp/ksu-next-setup.sh legacy
 
-          echo "=== Verify KernelSU Next integration ==="
-
-          if [ ! -d "KernelSU-Next/kernel" ]; then
-            echo "::error::KernelSU Next kernel source not found."
+          test -d KernelSU-Next/kernel || {
+            echo "::error::KernelSU Next source directory missing."
             exit 1
-          fi
+          }
 
-          if [ ! -L "drivers/kernelsu" ]; then
-            echo "::error::KernelSU Next symlink drivers/kernelsu not found."
-            ls -la drivers/ || true
+          test -L drivers/kernelsu || {
+            echo "::error::Expected drivers/kernelsu symlink missing."
+            ls -la drivers/
             exit 1
-          fi
+          }
 
-          if [ ! -f "drivers/kernelsu/Kconfig" ]; then
-            echo "::error::KernelSU Next Kconfig not found."
-            ls -la drivers/kernelsu/ || true
+          test -f drivers/kernelsu/Kconfig || {
+            echo "::error::KernelSU Next Kconfig missing."
             exit 1
-          fi
+          }
 
-          echo "=== Integration verified ==="
+          echo "=== KernelSU Next integration verified ==="
           ls -ld drivers/kernelsu
-          git status --short
 
       - name: Install build dependencies
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -77,10 +75,9 @@ jobs:
             libncurses-dev lz4 zip wget xz-utils file
 
       - name: Prepare upstream Clang
+        shell: bash
         run: |
           set -euo pipefail
-
-          mkdir -p "$HOME/clang"
 
           git clone --depth=1 \
             --single-branch \
@@ -90,38 +87,29 @@ jobs:
 
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
 
-          echo "=== Clang version ==="
           "$HOME/clang/bin/clang" --version
+          "$HOME/clang/bin/ld.lld" --version
 
       - name: Check source and toolchains
+        shell: bash
         run: |
           set -euo pipefail
 
-          echo "=== Source commit ==="
           git log -1 --oneline
-
-          echo "=== Kernel version ==="
           make kernelversion
 
-          echo "=== Required source files ==="
           test -f Makefile
           test -f arch/arm64/Makefile
           test -f arch/arm64/configs/vayu_defconfig
           test -f scripts/config
 
-          echo "=== GCC64 ==="
           aarch64-linux-gnu-gcc --version
-
-          echo "=== GCC32 ==="
           arm-linux-gnueabi-gcc --version
 
-          echo "=== LLVM tools ==="
-          "$HOME/clang/bin/clang" --version
-          "$HOME/clang/bin/ld.lld" --version
           "$HOME/clang/bin/llvm-ar" --version
 
-      
       - name: Generate KSU defconfig
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -130,10 +118,12 @@ jobs:
 
           make ARCH=arm64 O=out vayu_defconfig
 
-          echo "=== KernelSU Next: enable dependencies ==="
+          echo "=== Configure KernelSU Next and Kprobe ==="
 
           scripts/config --file out/.config --enable MODULES
           scripts/config --file out/.config --enable KPROBES
+          scripts/config --file out/.config --enable PERF_EVENTS
+          scripts/config --file out/.config --enable TRACING
           scripts/config --file out/.config --enable KPROBE_EVENTS
           scripts/config --file out/.config --enable KSU_KPROBE_HOOKS
           scripts/config --file out/.config --enable KSU
@@ -146,24 +136,25 @@ jobs:
 
           make ARCH=arm64 O=out olddefconfig
 
-          echo "=== Kprobe and KernelSU config ==="
+          echo "=== Final Kconfig values ==="
 
-          grep -E '^(CONFIG_(MODULES|KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=|# CONFIG_(MODULES|KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS) is not set)' \
+          grep -E '^(CONFIG_(MODULES|KSU|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|PERF_EVENTS|TRACING|HAVE_REGS_AND_STACK_ACCESS_API)=|# CONFIG_(MODULES|KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS|PERF_EVENTS|TRACING) is not set)' \
             out/.config || true
 
-          echo "=== Check Kconfig definitions ==="
+          if ! grep -qx 'CONFIG_KPROBE_EVENTS=y' out/.config; then
+            echo "::error::KPROBE_EVENTS is disabled by Kconfig."
+            echo "=== KPROBE_EVENTS definition ==="
+            sed -n '480,520p' kernel/trace/Kconfig
+            echo "=== Relevant symbol definitions ==="
+            grep -R -n -E \
+              'config (KPROBE_EVENTS|HAVE_REGS_AND_STACK_ACCESS_API|HAVE_PERF_EVENTS|PERF_EVENTS|TRACING)' \
+              Kconfig arch/arm64 kernel 2>/dev/null || true
+            exit 1
+          fi
 
-          grep -R -n -E \
-            'config (MODULES|KPROBES|HAVE_KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)' \
-            Kconfig arch/arm64/Kconfig kernel KSU-Next/kernel \
-            2>/dev/null || true
-
-          echo "=== Check required options ==="
-
-          for option in KSU KPROBES KPROBE_EVENTS KSU_KPROBE_HOOKS; do
+          for option in KSU KPROBES KSU_KPROBE_HOOKS; do
             if ! grep -qx "CONFIG_${option}=y" out/.config; then
-              echo "::error::CONFIG_${option} is not enabled."
-              echo "Inspect the Kconfig definitions and dependencies above."
+              echo "::error::CONFIG_${option} is disabled."
               exit 1
             fi
           done
@@ -176,48 +167,10 @@ jobs:
           echo "=== Kernel release ==="
           make ARCH=arm64 O=out kernelrelease
 
-          echo "=== Local version ==="
-          grep '^CONFIG_LOCALVERSION=' out/.config
-
-          echo "=== Enable KernelSU Next Kprobe hooks ==="
-
-          scripts/config --file out/.config --enable KPROBES
-          scripts/config --file out/.config --enable KPROBE_EVENTS
-          scripts/config --file out/.config --enable KSU_KPROBE_HOOKS
-          scripts/config --file out/.config --enable KSU
-
-          scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen-KSUN"
-
-          scripts/config --file out/.config \
-            --disable LOCALVERSION_AUTO
-
-          make ARCH=arm64 O=out olddefconfig
-
-          echo "=== Verify final configuration ==="
-
-          grep -E '^(CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=|# CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS) is not set)' \
-            out/.config || true
-
-          for option in KSU KPROBES KPROBE_EVENTS KSU_KPROBE_HOOKS; do
-            if ! grep -qx "CONFIG_${option}=y" out/.config; then
-              echo "::error::CONFIG_${option} is not enabled in final config."
-              exit 1
-            fi
-          done
-
-          cp out/.config baseline.config
-
-          echo "=== Kernel version ==="
-          make kernelversion
-
-          echo "=== Kernel release ==="
-          make ARCH=arm64 O=out kernelrelease
-
-          echo "=== Local version ==="
           grep '^CONFIG_LOCALVERSION=' out/.config
 
       - name: Compile kernel
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -254,6 +207,7 @@ jobs:
 
       - name: Verify kernel image
         if: success()
+        shell: bash
         run: |
           set -euo pipefail
 
@@ -264,14 +218,13 @@ jobs:
             exit 1
           fi
 
-          echo "=== Kernel image ==="
           file "$IMAGE"
           ls -lh "$IMAGE"
 
-          echo "=== Final kernel release ==="
+          echo "=== Kernel release ==="
           make ARCH=arm64 O=out kernelrelease
 
-          echo "=== Available build outputs ==="
+          echo "=== Available outputs ==="
           find out/arch/arm64/boot \
             -maxdepth 2 -type f \
             \( -name 'Image*' -o -name '*.dtb' -o -name 'dtbo.img' \) \
