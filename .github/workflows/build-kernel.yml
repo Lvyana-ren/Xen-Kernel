@@ -1,5 +1,5 @@
 
-name: Xen-Kernel - Baseline Build
+name: Xen-Kernel-KSUN - Legacy Kprobe Build
 
 on:
   workflow_dispatch:
@@ -13,12 +13,38 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout Anymore source
+      - name: Checkout Xen-Kernel-KSUN source
         uses: actions/checkout@v4
         with:
-          ref: "16"
+          ref: "16-KSUN"
           fetch-depth: 1
           lfs: true
+
+      - name: Integrate KernelSU Next Legacy
+        run: |
+          set -euo pipefail
+
+          echo "=== Integrating KernelSU Next Legacy ==="
+
+          if [ -d KernelSU-Next ] || [ -d KernelSU ]; then
+            echo "::error::Existing KernelSU directory detected."
+            exit 1
+          fi
+
+          curl -fLSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            -o /tmp/ksu-next-setup.sh
+
+          bash /tmp/ksu-next-setup.sh legacy
+
+          echo "=== Verify integration ==="
+
+          if [ ! -d KernelSU ]; then
+            echo "::error::KernelSU directory not found after setup."
+            exit 1
+          fi
+
+          find KernelSU -maxdepth 2 -type f | head -40
 
       - name: Install build dependencies
         run: |
@@ -80,25 +106,41 @@ jobs:
           "$HOME/clang/bin/ld.lld" --version
           "$HOME/clang/bin/llvm-ar" --version
 
-      - name: Generate baseline defconfig
+      - name: Generate KSU defconfig
         run: |
-          set -e
+          set -euo pipefail
 
           export ARCH=arm64
           export PATH="$HOME/clang/bin:$PATH"
 
           make ARCH=arm64 O=out vayu_defconfig
 
-          # Set Xen-Kernel version suffix
+          echo "=== Enable KernelSU Next Kprobe hooks ==="
+
+          scripts/config --file out/.config --enable KPROBES
+          scripts/config --file out/.config --enable KPROBE_EVENTS
+          scripts/config --file out/.config --enable KSU_KPROBE_HOOKS
+          scripts/config --file out/.config --enable KSU
+
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen"
+            --set-str LOCALVERSION "-Xen-KSUN"
 
           scripts/config --file out/.config \
             --disable LOCALVERSION_AUTO
 
           make ARCH=arm64 O=out olddefconfig
 
-          # Save the final configuration
+          echo "=== Verify final configuration ==="
+
+          grep -E '^(CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=|# CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS) is not set)' out/.config || true
+
+          for option in KSU KPROBES KPROBE_EVENTS KSU_KPROBE_HOOKS; do
+            if ! grep -qx "CONFIG_${option}=y" out/.config; then
+              echo "::error::CONFIG_${option} is not enabled in final config."
+              exit 1
+            fi
+          done
+
           cp out/.config baseline.config
 
           echo "=== Kernel version ==="
@@ -170,11 +212,11 @@ jobs:
             \( -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" \) \
             -print
 
-      - name: Upload baseline artifacts
+      - name: Upload Xen-Kernel-KSUN artifacts
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-baseline
+          name: Xen-Kernel-KSUN-legacy-kprobe
           if-no-files-found: error
           path: |
             out/arch/arm64/boot/Image
@@ -189,7 +231,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-kernel-diagnostics
+          name: Xen-Kernel-KSUN-diagnostics
           if-no-files-found: warn
           path: |
             build.log
