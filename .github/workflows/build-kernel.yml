@@ -66,7 +66,7 @@ jobs:
           test -d KernelSU-Next/kernel
           test -f drivers/kernelsu/Kconfig
 
-          echo "===== KernelSU-Next commit ====="
+          echo "===== KernelSU-Next revision ====="
           git -C KernelSU-Next rev-parse HEAD
           git -C KernelSU-Next describe --tags --always || true
 
@@ -77,31 +77,43 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           def replace_once(text, old, new, label):
               count = text.count(old)
               if count != 1:
                   raise SystemExit(
-                      f"PATCH ERROR: {label}: expected one match, found {count}"
+                      f"PATCH ERROR: {label}: expected 1 match, found {count}"
                   )
               return text.replace(old, new, 1)
 
-          # ---------------------------------------------------------
+          def patch_function(text, start_marker, end_marker,
+                             old, new, label):
+              start = text.find(start_marker)
+              if start < 0:
+                  raise SystemExit(
+                      f"PATCH ERROR: function start not found: {label}"
+                  )
+
+              end = text.find(end_marker, start + len(start_marker))
+              if end < 0:
+                  raise SystemExit(
+                      f"PATCH ERROR: function boundary not found: {label}"
+                  )
+
+              body = text[start:end]
+              body = replace_once(body, old, new, label)
+              return text[:start] + body + text[end:]
+
+          # -------------------------------------------------------
           # fs/exec.c
-          # Add the KSUN handler declaration and wire execve hooks.
-          # ---------------------------------------------------------
+          # -------------------------------------------------------
           p = Path("fs/exec.c")
           text = p.read_text()
 
           if "ksu_handle_execveat" in text:
               raise SystemExit(
-                  "PATCH ERROR: execveat handler already exists in fs/exec.c"
+                  "PATCH ERROR: execveat hook already exists in fs/exec.c"
               )
-
-          declaration_anchor = (
-              "int do_execve(struct filename *filename,\n"
-          )
 
           declaration = (
               "#if defined(CONFIG_KSU)\n"
@@ -114,96 +126,70 @@ jobs:
 
           text = replace_once(
               text,
-              declaration_anchor,
-              declaration + declaration_anchor,
+              "int do_execve(struct filename *filename,\n",
+              declaration + "int do_execve(struct filename *filename,\n",
               "execve handler declaration",
           )
 
-          native_old = (
-              "int do_execve(struct filename *filename,\n"
-              "\tconst char __user *const __user *__argv,\n"
-              "\tconst char __user *const __user *__envp)\n"
-              "{\n"
-              "\tstruct user_arg_ptr argv = { .ptr.native = __argv };\n"
-              "\tstruct user_arg_ptr envp = { .ptr.native = __envp };\n"
-              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n"
-              "}"
+          # Native execve: use real local variables for pointer arguments.
+          text = patch_function(
+              text,
+              "int do_execve(struct filename *filename,",
+              "int do_execveat(",
+              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);",
+              (
+                  "#if defined(CONFIG_KSU)\n"
+                  "\tint fd = AT_FDCWD;\n"
+                  "\tint flags = 0;\n"
+                  "\tksu_handle_execveat(&fd, &filename, "
+                  "&argv, &envp, &flags);\n"
+                  "\treturn do_execveat_common(fd, filename, "
+                  "argv, envp, flags);\n"
+                  "#else\n"
+                  "\treturn do_execveat_common(AT_FDCWD, "
+                  "filename, argv, envp, 0);\n"
+                  "#endif"
+              ),
+              "native execve hook",
           )
 
-          native_new = (
-              "int do_execve(struct filename *filename,\n"
-              "\tconst char __user *const __user *__argv,\n"
-              "\tconst char __user *const __user *__envp)\n"
-              "{\n"
-              "\tstruct user_arg_ptr argv = { .ptr.native = __argv };\n"
-              "\tstruct user_arg_ptr envp = { .ptr.native = __envp };\n"
-              "#if defined(CONFIG_KSU)\n"
-              "\tint fd = AT_FDCWD;\n"
-              "\tint flags = 0;\n"
-              "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
-              "\treturn do_execveat_common(fd, filename, argv, envp, flags);\n"
-              "#else\n"
-              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n"
-              "#endif\n"
-              "}"
+          # Compat execve: isolate its own function instead of using
+          # a fragile regex that assumes exact whitespace and line endings.
+          text = patch_function(
+              text,
+              "static int compat_do_execve(struct filename *filename,",
+              "static int compat_do_execveat(",
+              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);",
+              (
+                  "#if defined(CONFIG_KSU)\n"
+                  "\tint fd = AT_FDCWD;\n"
+                  "\tint flags = 0;\n"
+                  "\tksu_handle_execveat(&fd, &filename, "
+                  "&argv, &envp, &flags);\n"
+                  "\treturn do_execveat_common(fd, filename, "
+                  "argv, envp, flags);\n"
+                  "#else\n"
+                  "\treturn do_execveat_common(AT_FDCWD, "
+                  "filename, argv, envp, 0);\n"
+                  "#endif"
+              ),
+              "compat execve hook",
           )
 
-          text = replace_once(
-              text, native_old, native_new, "native execve hook"
-          )
-
-          compat_pattern = re.compile(
-              r"(static int compat_do_execve\(struct filename \*filename,"
-              r".*?\n\})(?=\nstatic int compat_do_execveat)",
-              re.S,
-          )
-
-          match = compat_pattern.search(text)
-          if not match:
-              raise SystemExit(
-                  "PATCH ERROR: compat_do_execve function not found"
-              )
-
-          compat_func = match.group(1)
-          compat_old = (
-              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);"
-          )
-          compat_new = (
-              "#if defined(CONFIG_KSU)\n"
-              "\tint fd = AT_FDCWD;\n"
-              "\tint flags = 0;\n"
-              "\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n"
-              "\treturn do_execveat_common(fd, filename, argv, envp, flags);\n"
-              "#else\n"
-              "\treturn do_execveat_common(AT_FDCWD, filename, argv, envp, 0);\n"
-              "#endif"
-          )
-
-          compat_func = replace_once(
-              compat_func, compat_old, compat_new, "compat execve hook"
-          )
-
-          text = (
-              text[:match.start()]
-              + compat_func
-              + text[match.end():]
-          )
           p.write_text(text)
 
-          # ---------------------------------------------------------
+          # -------------------------------------------------------
           # fs/open.c
-          # Add the KSUN faccessat handler.
-          # ---------------------------------------------------------
+          # -------------------------------------------------------
           p = Path("fs/open.c")
           text = p.read_text()
 
           if "ksu_handle_faccessat" in text:
               raise SystemExit(
-                  "PATCH ERROR: faccessat handler already exists in fs/open.c"
+                  "PATCH ERROR: faccessat hook already exists in fs/open.c"
               )
 
-          open_anchor = "SYSCALL_DEFINE3(faccessat, int, dfd, "
-          open_declaration = (
+          declaration = (
               "#ifdef CONFIG_KSU\n"
               "__attribute__((hot))\n"
               "extern int ksu_handle_faccessat(int *dfd, "
@@ -214,42 +200,43 @@ jobs:
 
           text = replace_once(
               text,
-              open_anchor,
-              open_declaration + open_anchor,
+              "SYSCALL_DEFINE3(faccessat, int, dfd, "
+              "const char __user *, filename, int, mode)",
+              declaration
+              + "SYSCALL_DEFINE3(faccessat, int, dfd, "
+              "const char __user *, filename, int, mode)",
               "faccessat handler declaration",
           )
 
-          faccess_anchor = (
-              "\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n"
-              "\tif (mode & ~S_IRWXO)"
-          )
-
-          faccess_new = (
-              "\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n"
-              "#ifdef CONFIG_KSU\n"
-              "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
-              "#endif\n"
-              "\tif (mode & ~S_IRWXO)"
-          )
-
-          text = replace_once(
+          text = patch_function(
               text,
-              faccess_anchor,
-              faccess_new,
-              "faccessat hook call",
+              "SYSCALL_DEFINE3(faccessat, int, dfd, "
+              "const char __user *, filename, int, mode)",
+              "\n#ifdef CONFIG_COMPAT",
+              "\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n",
+              (
+                  "\tunsigned int lookup_flags = LOOKUP_FOLLOW;\n"
+                  "#ifdef CONFIG_KSU\n"
+                  "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+                  "#endif\n"
+              ),
+              "faccessat hook",
           )
 
           p.write_text(text)
 
-          print("Manual Hook patches applied successfully.")
+          print("Manual Hook source patches applied.")
           PY
 
           echo "===== Check whitespace ====="
           git diff --check
 
-          echo "===== Verify handler locations ====="
+          echo "===== Hook locations ====="
           grep -n 'ksu_handle_execveat' fs/exec.c
           grep -n 'ksu_handle_faccessat' fs/open.c
+
+          echo "===== Changed files ====="
+          git diff --stat
 
       - name: Configure kernel
         shell: bash
@@ -259,7 +246,7 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
 
-          # Set the requested kernel identity.
+          # Keep the requested Xen-Kernel release suffix.
           sed -i \
             's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION = -openela-Xen-KSUN/' \
             Makefile
@@ -282,13 +269,10 @@ jobs:
             'CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK)=' \
             out/.config || true
 
-          if ! grep -q '^CONFIG_KSU=y' out/.config; then
-            echo "::error::CONFIG_KSU is not enabled."
-            exit 1
-          fi
+          grep -q '^CONFIG_KSU=y' out/.config
 
           if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
-            echo "::error::Manual Hook is not enabled by olddefconfig."
+            echo "::error::Manual Hook configuration is not enabled."
             exit 1
           fi
 
@@ -316,7 +300,6 @@ jobs:
           export ARCH=arm64
           export SUBARCH=arm64
           export PATH="$GITHUB_WORKSPACE/toolchains/clang/bin:$PATH"
-
           export CC=clang
           export LLVM=1
           export LLVM_IAS=1
@@ -377,6 +360,9 @@ jobs:
 
           git -C KernelSU-Next rev-parse HEAD \
             > artifacts/ksun-commit.txt 2>/dev/null || true
+
+          make -s O=out kernelrelease \
+            > artifacts/kernel-release.txt 2>/dev/null || true
 
       - name: Upload build artifacts
         if: always()
