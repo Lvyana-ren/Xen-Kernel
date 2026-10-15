@@ -37,14 +37,27 @@ jobs:
 
           bash /tmp/ksu-next-setup.sh legacy
 
-          echo "=== Verify integration ==="
 
-          if [ ! -d KernelSU ]; then
-            echo "::error::KernelSU directory not found after setup."
-            exit 1
-          fi
+echo "=== Verify KernelSU Next integration ==="
 
-          find KernelSU -maxdepth 2 -type f | head -40
+if [ ! -d "KernelSU-Next/kernel" ]; then
+  echo "::error::KernelSU Next kernel source not found."
+  exit 1
+fi
+
+if [ ! -L "drivers/kernelsu" ]; then
+  echo "::error::KernelSU Next symlink drivers/kernelsu not found."
+  exit 1
+fi
+
+if [ ! -f "drivers/kernelsu/Kconfig" ]; then
+  echo "::error::KernelSU Next Kconfig not found."
+  exit 1
+fi
+
+echo "=== KernelSU Next integration verified ==="
+ls -ld drivers/kernelsu
+git status --short
 
       - name: Install build dependencies
         run: |
