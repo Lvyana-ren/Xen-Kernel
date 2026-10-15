@@ -38,7 +38,7 @@ jobs:
           bash /tmp/ksu-next-setup.sh legacy
 
 
-echo "=== Verify KernelSU Next integration ==="
+          echo "=== Verify KernelSU Next integration ==="
 
 if [ ! -d "KernelSU-Next/kernel" ]; then
   echo "::error::KernelSU Next kernel source not found."
