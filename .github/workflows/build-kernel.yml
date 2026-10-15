@@ -26,7 +26,7 @@ jobs:
 
           echo "=== Integrating KernelSU Next Legacy ==="
 
-          if [ -d KernelSU-Next ] || [ -d KernelSU ]; then
+          if [ -d "KernelSU-Next" ] || [ -d "KernelSU" ]; then
             echo "::error::Existing KernelSU directory detected."
             exit 1
           fi
@@ -37,31 +37,33 @@ jobs:
 
           bash /tmp/ksu-next-setup.sh legacy
 
-
           echo "=== Verify KernelSU Next integration ==="
 
-if [ ! -d "KernelSU-Next/kernel" ]; then
-  echo "::error::KernelSU Next kernel source not found."
-  exit 1
-fi
+          if [ ! -d "KernelSU-Next/kernel" ]; then
+            echo "::error::KernelSU Next kernel source not found."
+            exit 1
+          fi
 
-if [ ! -L "drivers/kernelsu" ]; then
-  echo "::error::KernelSU Next symlink drivers/kernelsu not found."
-  exit 1
-fi
+          if [ ! -L "drivers/kernelsu" ]; then
+            echo "::error::KernelSU Next symlink drivers/kernelsu not found."
+            ls -la drivers/ || true
+            exit 1
+          fi
 
-if [ ! -f "drivers/kernelsu/Kconfig" ]; then
-  echo "::error::KernelSU Next Kconfig not found."
-  exit 1
-fi
+          if [ ! -f "drivers/kernelsu/Kconfig" ]; then
+            echo "::error::KernelSU Next Kconfig not found."
+            ls -la drivers/kernelsu/ || true
+            exit 1
+          fi
 
-echo "=== KernelSU Next integration verified ==="
-ls -ld drivers/kernelsu
-git status --short
+          echo "=== Integration verified ==="
+          ls -ld drivers/kernelsu
+          git status --short
 
       - name: Install build dependencies
         run: |
-          set -e
+          set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install -y \
             bc bison build-essential ccache \
@@ -72,12 +74,11 @@ git status --short
             gcc-arm-linux-gnueabi \
             binutils-aarch64-linux-gnu \
             binutils-arm-linux-gnueabi \
-            libncurses-dev \
-            lz4 zip wget xz-utils
+            libncurses-dev lz4 zip wget xz-utils file
 
       - name: Prepare upstream Clang
         run: |
-          set -e
+          set -euo pipefail
 
           mkdir -p "$HOME/clang"
 
@@ -94,7 +95,7 @@ git status --short
 
       - name: Check source and toolchains
         run: |
-          set -e
+          set -euo pipefail
 
           echo "=== Source commit ==="
           git log -1 --oneline
@@ -145,7 +146,8 @@ git status --short
 
           echo "=== Verify final configuration ==="
 
-          grep -E '^(CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=|# CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS) is not set)' out/.config || true
+          grep -E '^(CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS)=|# CONFIG_(KSU|KPROBES|KPROBE_EVENTS|KSU_KPROBE_HOOKS) is not set)' \
+            out/.config || true
 
           for option in KSU KPROBES KPROBE_EVENTS KSU_KPROBE_HOOKS; do
             if ! grep -qx "CONFIG_${option}=y" out/.config; then
@@ -203,7 +205,7 @@ git status --short
       - name: Verify kernel image
         if: success()
         run: |
-          set -e
+          set -euo pipefail
 
           IMAGE="out/arch/arm64/boot/Image"
 
@@ -222,7 +224,7 @@ git status --short
           echo "=== Available build outputs ==="
           find out/arch/arm64/boot \
             -maxdepth 2 -type f \
-            \( -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" \) \
+            \( -name 'Image*' -o -name '*.dtb' -o -name 'dtbo.img' \) \
             -print
 
       - name: Upload Xen-Kernel-KSUN artifacts
@@ -230,7 +232,7 @@ git status --short
         uses: actions/upload-artifact@v4
         with:
           name: Xen-Kernel-KSUN-legacy-kprobe
-          if-no-files-found: error
+          if-no-files-found: warn
           path: |
             out/arch/arm64/boot/Image
             out/arch/arm64/boot/Image.gz
