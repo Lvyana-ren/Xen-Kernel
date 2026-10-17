@@ -288,6 +288,14 @@ jobs:
           echo "===== Final LTO config ====="
           grep -E '^(CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE|ARCH_SUPPORTS_LTO_CLANG|ARCH_SUPPORTS_THINLTO)=|# CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE) is not set)' out/.config
 
+          if ! grep -q '^CONFIG_LTO=y$' out/.config ||
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::ThinLTO is not enabled in final .config"
+            exit 1
+          fi
+
           cp out/.config baseline-ksun.config
 
           echo "===== Effective configuration ====="
