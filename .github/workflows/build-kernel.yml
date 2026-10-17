@@ -279,6 +279,8 @@ jobs:
             --enable KSU_MANUAL_HOOK \
             --disable KSU_KPROBES_HOOK \
             --disable KSU_SYSCALL_TABLE_HOOK
+            --enable LTO \
+            --enable THINLTO \
 
           make ARCH=arm64 O=out olddefconfig
 
