@@ -281,7 +281,8 @@ jobs:
             --disable KSU_SYSCALL_TABLE_HOOK \
             --enable LTO_CLANG \
             --enable LTO \
-            --enable THINLTO
+            --enable THINLTO \
+            --disable LTO_NONE
 
           make ARCH=arm64 O=out olddefconfig
 
