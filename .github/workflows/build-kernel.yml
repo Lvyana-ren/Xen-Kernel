@@ -7,125 +7,40 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: xen-ksun-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 90
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPILERCHECK: "%compiler% --version"
+      KBUILD_BUILD_USER: Lvyana
+      KBUILD_BUILD_HOST: Xen-Kernel
 
     steps:
-      # ============================================================
-      # 1. Checkout Xen-Kernel source
-      # ============================================================
+      # 1. Checkout Xen-Kernel
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
           ref: "16-KSUN_Manual_hook"
           fetch-depth: 1
-          lfs: true
 
-      # ============================================================
-      # 2. Dependencies — preserve baseline build environment
-      # ============================================================
-      - name: Install build dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sudo apt-get update
-
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc \
-            bison \
-            build-essential \
-            ccache \
-            clang \
-            flex \
-            git \
-            libelf-dev \
-            libssl-dev \
-            lld \
-            llvm \
-            make \
-            python3 \
-            rsync \
-            device-tree-compiler \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            binutils-aarch64-linux-gnu \
-            binutils-arm-linux-gnueabi \
-            libncurses-dev \
-            lz4 \
-            zip \
-            wget \
-            xz-utils
-
-      # ============================================================
-      # 3. Clang — use the same toolchain as baseline branch 16
-      # ============================================================
-      - name: Prepare upstream Clang
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$HOME/clang"
-
-          git clone --depth=1 \
-            --single-branch \
-            --branch 15.0 \
-            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
-            "$HOME/clang"
-
-          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
-
-          echo "===== Clang ====="
-          "$HOME/clang/bin/clang" --version
-
-          echo "===== LLD ====="
-          "$HOME/clang/bin/ld.lld" --version
-
-      # ============================================================
-      # 4. Validate source before making changes
-      # ============================================================
-      - name: Check source and toolchains
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "===== Source commit ====="
-          git log -1 --oneline
-
-          echo "===== Kernel version ====="
-          make kernelversion
-
-          echo "===== Required files ====="
-          test -f Makefile
-          test -f arch/arm64/Makefile
-          test -f arch/arm64/configs/vayu_defconfig
-          test -f scripts/config
-          test -f scripts/apply-ksun-manual-hooks.py
-          test -f fs/namespace.c
-
-          echo "===== GCC64 ====="
-          aarch64-linux-gnu-gcc --version
-
-          echo "===== GCC32 ====="
-          arm-linux-gnueabi-gcc --version
-
-          echo "===== LLVM ====="
-          "$HOME/clang/bin/clang" --version
-          "$HOME/clang/bin/ld.lld" --version
-          "$HOME/clang/bin/llvm-ar" --version
-
-      # ============================================================
-      # 5. Fetch official KernelSU-Next source automatically
-      # ============================================================
-      - name: Install official KernelSU-Next Legacy source
+      # 2. Install KSUN first to fail fast
+      - name: Install KernelSU Next Legacy
         shell: bash
         run: |
           set -euo pipefail
 
           if [ -e KernelSU-Next ] || [ -e KernelSU ]; then
-            echo "::error::A KernelSU source directory already exists."
+            echo "::error::KSUN source directory already exists."
             exit 1
           fi
 
@@ -138,14 +53,11 @@ jobs:
           test -d KernelSU-Next/kernel
           test -e drivers/kernelsu
 
-          echo "===== KSUN source revision ====="
+          echo "===== KSUN commit ====="
           git -C KernelSU-Next rev-parse HEAD
-          git -C KernelSU-Next describe --tags --always || true
 
-      # ============================================================
-      # 6. Backport path_umount for this pre-5.9 kernel
-      # ============================================================
-      - name: Backport path_umount for kernel 4.14
+      # 3. Backport path_umount for Linux 4.14
+      - name: Backport path_umount
         shell: bash
         run: |
           set -euo pipefail
@@ -160,11 +72,9 @@ jobs:
           signature = "int path_umount(struct path *path, int flags)"
 
           if signature in text:
-              print("path_umount already exists; no change needed.")
+              print("path_umount already exists; skipping.")
               raise SystemExit(0)
 
-          # Locate the existing may_mandlock conditional block.
-          # The upstream backport belongs immediately after this block.
           pattern = re.compile(
               r"(?m)^#ifdef[ \t]+CONFIG_MANDATORY_FILE_LOCKING[ \t]*\n"
               r".*?"
@@ -173,15 +83,13 @@ jobs:
           )
 
           matches = list(pattern.finditer(text))
-
           if len(matches) != 1:
               raise SystemExit(
-                  "Could not uniquely locate the may_mandlock block "
-                  f"in fs/namespace.c; found {len(matches)} matches."
+                  "Cannot uniquely locate mandatory locking block; "
+                  f"found {len(matches)} matches."
               )
 
           backport = r'''
-
           /*
            * Xen-Kernel compatibility backport:
            * path_umount() for kernels older than Linux 5.9.
@@ -221,76 +129,152 @@ jobs:
               if (!ret)
                   ret = do_umount(mnt, flags);
 
-              /*
-               * Do not call path_put(): that would clear
-               * mnt_expiry_mark.
-               */
               dput(path->dentry);
               mntput_no_expire(mnt);
 
               return ret;
           }
-
           '''
 
           match = matches[0]
           text = text[:match.end()] + backport + text[match.end():]
           path.write_text(text)
 
-          print("Backported path_umount() into fs/namespace.c.")
+          print("path_umount backport applied.")
           PY
 
-          echo "===== Verify backport ====="
-          grep -n -A 35 \
+          grep -n -A 8 \
             'int path_umount(struct path \*path, int flags)' \
             fs/namespace.c
 
           git diff --check
 
-      # ============================================================
-      # 7. Apply Xen-Kernel Manual Hook integration
-      # ============================================================
-      - name: Apply Xen-Kernel Manual Hook integration
+      # 4. Apply existing Xen-Kernel manual hook patch
+      - name: Apply KSUN manual hooks
         shell: bash
         run: |
           set -euo pipefail
 
+          test -f scripts/apply-ksun-manual-hooks.py
           python3 scripts/apply-ksun-manual-hooks.py
 
-          echo "===== Verify five hook points ====="
+          echo "===== Verify manual hook points ====="
           grep -n 'ksu_handle_execveat' fs/exec.c
           grep -n 'ksu_handle_faccessat' fs/open.c
           grep -n 'ksu_handle_sys_read\|ksu_vfs_read_hook' fs/read_write.c
           grep -n 'ksu_handle_stat' fs/stat.c
           grep -n 'ksu_handle_sys_reboot' kernel/reboot.c
 
-          echo "===== Verify path_umount implementation ====="
-          grep -n 'int path_umount(struct path \*path, int flags)' \
-            fs/namespace.c
-
           git diff --check
 
-      # ============================================================
-      # 8. Configure using the known baseline defconfig
-      # ============================================================
-      - name: Generate Xen-Kernel KSUN defconfig
+      # 5. Install build dependencies
+      - name: Install build dependencies
         shell: bash
         run: |
           set -euo pipefail
 
-          export ARCH=arm64
-          export SUBARCH=arm64
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            --no-install-recommends \
+            bc bison build-essential ccache flex git curl \
+            libelf-dev libssl-dev make python3 rsync \
+            device-tree-compiler \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            libncurses-dev lz4 zip wget xz-utils file
+
+      # 6. Restore compiler cache
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-xen-ksun-ccache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-xen-ksun-ccache-
+
+      # 7. Restore the exact baseline toolchain source
+      - name: Restore baseline Clang cache
+        uses: actions/cache@v4
+        with:
+          path: ~/clang
+          key: ${{ runner.os }}-xen-clang-r547379-branch15.0-v1
+
+      - name: Prepare baseline Clang
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -x "$HOME/clang/bin/clang" ] ||
+             [ ! -x "$HOME/clang/bin/ld.lld" ]; then
+
+            rm -rf "$HOME/clang"
+
+            git clone --depth=1 \
+              --single-branch \
+              --branch 15.0 \
+              https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
+              "$HOME/clang"
+
+            rm -rf "$HOME/clang/.git"
+          fi
+
+          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+
+          echo "===== Actual Clang version ====="
+          "$HOME/clang/bin/clang" --version
+
+          echo "===== Actual LLD version ====="
+          "$HOME/clang/bin/ld.lld" --version
+
+          echo "===== Clang target ====="
+          "$HOME/clang/bin/clang" -dumpmachine
+
+      # 8. Validate source
+      - name: Validate source and toolchains
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f Makefile
+          test -f arch/arm64/Makefile
+          test -f arch/arm64/configs/vayu_defconfig
+          test -f scripts/config
+          test -f scripts/apply-ksun-manual-hooks.py
+
+          echo "===== Source commit ====="
+          git rev-parse HEAD
+
+          echo "===== Kernel version ====="
+          make kernelversion
+
+          echo "===== GCC64 ====="
+          aarch64-linux-gnu-gcc --version
+
+          echo "===== GCC32 ====="
+          arm-linux-gnueabi-gcc --version
+
+          echo "===== Clang ====="
+          clang --version
+
+          echo "===== LLD ====="
+          ld.lld --version
+
+      # 9. Generate configuration
+      - name: Configure KSUN manual hook without KPROBES
+        shell: bash
+        run: |
+          set -euo pipefail
+
           export PATH="$HOME/clang/bin:$PATH"
 
           make ARCH=arm64 O=out vayu_defconfig
 
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen-KSUN"
-
-          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Xen-KSUN" \
             --disable LOCALVERSION_AUTO \
             --enable MODULES \
-            --enable KPROBES \
+            --disable KPROBES \
+            --disable KRETPROBES \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
             --disable KSU_KPROBES_HOOK \
@@ -300,9 +284,9 @@ jobs:
 
           cp out/.config baseline-ksun.config
 
-          echo "===== Effective KSUN configuration ====="
+          echo "===== Effective configuration ====="
           grep -E \
-            '^(CONFIG_KSU|CONFIG_KSU_MANUAL_HOOK|CONFIG_KSU_KPROBES_HOOK|CONFIG_KSU_SYSCALL_TABLE_HOOK|CONFIG_LOCALVERSION)=' \
+            '^(CONFIG_(LOCALVERSION|MODULES|KPROBES|KRETPROBES|KSU|KSU_MANUAL_HOOK|KSU_KPROBES_HOOK|KSU_SYSCALL_TABLE_HOOK))=' \
             out/.config || true
 
           if ! grep -q '^CONFIG_KSU=y' out/.config; then
@@ -311,20 +295,33 @@ jobs:
           fi
 
           if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
-            echo "::error::CONFIG_KSU_MANUAL_HOOK is not enabled."
+            echo "::error::KSUN manual hook is not enabled."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_KPROBES=y' out/.config; then
+            echo "::error::KPROBES was re-enabled by Kconfig."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_KRETPROBES=y' out/.config; then
+            echo "::error::KRETPROBES was re-enabled by Kconfig."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_KSU_KPROBES_HOOK=y' out/.config; then
+            echo "::error::KSUN KPROBES hook is enabled."
             exit 1
           fi
 
           echo "===== Kernel release ====="
           make ARCH=arm64 O=out kernelrelease
 
-      # ============================================================
-      # 9. Build — preserve the baseline compiler arguments
-      # ============================================================
-      - name: Compile Xen-Kernel KSUN Image
+      # 10. Compile using baseline compiler arguments
+      - name: Compile Xen-Kernel Image
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           export ARCH=arm64
           export SUBARCH=arm64
@@ -333,7 +330,6 @@ jobs:
           export KBUILD_BUILD_HOST="Xen-Kernel"
 
           set +e
-
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
@@ -360,43 +356,31 @@ jobs:
             Image 2>&1 | tee build.log
 
           BUILD_STATUS=${PIPESTATUS[0]}
-
           set -e
+
+          ccache -s || true
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo "::error::Kernel compilation failed."
             exit "$BUILD_STATUS"
           fi
 
-          echo "===== Verify kernel Image ====="
-
           IMAGE="out/arch/arm64/boot/Image"
 
           if [ ! -s "$IMAGE" ]; then
             echo "::error::Kernel Image is missing or empty."
-            find out/arch/arm64/boot \
-              -maxdepth 4 -type f \
-              \( -name 'Image*' -o -name '*.dtb' \) \
-              -print || true
             exit 1
           fi
 
+          echo "===== Kernel Image ====="
           file "$IMAGE"
           ls -lh "$IMAGE"
 
-          echo "===== Final kernel release ====="
+          echo "===== Kernel release ====="
           make ARCH=arm64 O=out kernelrelease
 
-          echo "===== Build outputs ====="
-          find out/arch/arm64/boot \
-            -maxdepth 3 -type f \
-            \( -name 'Image*' -o -name '*.dtb' -o -name 'dtbo.img' \) \
-            -print
-
-      # ============================================================
-      # 10. Collect diagnostics and kernel image
-      # ============================================================
-      - name: Collect build artifacts
+      # 11. Collect artifacts even when compilation fails
+      - name: Collect diagnostics and artifacts
         if: always()
         shell: bash
         run: |
@@ -404,45 +388,30 @@ jobs:
 
           mkdir -p artifacts
 
-          if [ -f build.log ]; then
-            cp build.log artifacts/
-          fi
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f baseline-ksun.config ]] || cp baseline-ksun.config artifacts/
 
-          if [ -f baseline-ksun.config ]; then
-            cp baseline-ksun.config artifacts/
-          fi
-
-          if [ -f out/.config ]; then
+          if [[ -f out/.config ]]; then
             cp out/.config artifacts/kernel.config
           fi
 
-          if [ -s out/arch/arm64/boot/Image ]; then
-            cp out/arch/arm64/boot/Image artifacts/Image
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
           fi
 
-          if [ -s out/arch/arm64/boot/Image.gz ]; then
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
             cp out/arch/arm64/boot/Image.gz artifacts/
           fi
 
-          if [ -s out/arch/arm64/boot/Image.gz-dtb ]; then
-            cp out/arch/arm64/boot/Image.gz-dtb artifacts/
-          fi
-
-          if [ -s out/arch/arm64/boot/dtbo.img ]; then
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
             cp out/arch/arm64/boot/dtbo.img artifacts/
           fi
 
-          if [ -s out/arch/arm64/boot/dtb.img ]; then
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
             cp out/arch/arm64/boot/dtb.img artifacts/
           fi
 
-          if [ -d out/arch/arm64/boot/dts ]; then
-            find out/arch/arm64/boot/dts \
-              -type f -name '*.dtb' \
-              -exec cp --parents '{}' artifacts/ \; || true
-          fi
-
-          if [ -f Makefile ]; then
+          if [[ -f Makefile ]]; then
             make -s ARCH=arm64 O=out kernelrelease \
               > artifacts/kernel-release.txt 2>&1 || true
           fi
@@ -450,22 +419,19 @@ jobs:
           git rev-parse HEAD \
             > artifacts/source-commit.txt 2>/dev/null || true
 
-          if [ -d KernelSU-Next/.git ]; then
+          if [[ -d KernelSU-Next/.git ]]; then
             git -C KernelSU-Next rev-parse HEAD \
               > artifacts/ksun-commit.txt 2>/dev/null || true
           fi
 
-          echo "===== Artifact inventory ====="
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+
+          echo "===== Artifacts ====="
           find artifacts -type f -exec ls -lh '{}' \;
 
-          if [ ! -s artifacts/Image ]; then
-            echo "::warning::Image is not available; inspect build.log."
-          fi
-
-      # ============================================================
-      # 11. Upload even on failure so the next error is diagnosable
-      # ============================================================
-      - name: Upload Xen-Kernel KSUN artifacts
+      # 12. Upload artifacts even on failure
+      - name: Upload Xen-Kernel artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
