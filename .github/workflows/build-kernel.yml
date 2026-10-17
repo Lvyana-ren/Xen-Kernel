@@ -278,7 +278,7 @@ jobs:
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
             --disable KSU_KPROBES_HOOK \
-            --disable KSU_SYSCALL_TABLE_HOOK
+            --disable KSU_SYSCALL_TABLE_HOOK \
             --enable LTO \
             --enable THINLTO \
 
