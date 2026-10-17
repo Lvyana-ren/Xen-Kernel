@@ -279,10 +279,14 @@ jobs:
             --enable KSU_MANUAL_HOOK \
             --disable KSU_KPROBES_HOOK \
             --disable KSU_SYSCALL_TABLE_HOOK \
+            --enable LTO_CLANG \
             --enable LTO \
             --enable THINLTO
 
           make ARCH=arm64 O=out olddefconfig
+
+          echo "===== Final LTO config ====="
+          grep -E '^(CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE|ARCH_SUPPORTS_LTO_CLANG|ARCH_SUPPORTS_THINLTO)=|# CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE) is not set)' out/.config
 
           cp out/.config baseline-ksun.config
 
