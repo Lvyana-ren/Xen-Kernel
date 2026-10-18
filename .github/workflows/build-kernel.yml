@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16-KSUN-DEBUGING"
+          ref: "16-KSUN_Manual_hook"
           fetch-depth: 1
 
       # 2. Install KSUN first to fail fast
@@ -320,6 +320,8 @@ jobs:
             else
               echo "scripts/kconfig-why.py tidak ada di repo; salin dulu filenya."
             fi
+          else
+            echo "===== LTO_CLANG AKTIF setelah olddefconfig -> kconfig-why dilewati ====="
           fi
 
           echo "===== Final LTO config ====="
@@ -412,6 +414,8 @@ jobs:
           ccache -s || true
 
           if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== 25 baris error pertama dari build.log ====="
+            grep -n -m 25 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
             echo "::error::Kernel compilation failed."
             exit "$BUILD_STATUS"
           fi
@@ -428,7 +432,18 @@ jobs:
           ls -lh "$IMAGE"
 
           echo "===== Kernel release ====="
-          make ARCH=arm64 O=out kernelrelease
+          # Baca file hasil build; jangan panggil make lagi tanpa variabel toolchain
+          # (make akan mengevaluasi ulang Makefile/config dengan gcc bawaan).
+          cat out/include/config/kernel.release
+
+          # Bukti LTO dari HASIL build (bukan dari .config yang bisa berubah setelahnya)
+          echo "===== Cek LTO di hasil build ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "(config tertanam di Image tidak terbaca)"
+          fi
+          echo "simbol .llvm. di System.map: $(grep -c '\.llvm\.' out/System.map || true)  (>0 = ThinLTO)"
 
       # 11. Collect artifacts even when compilation fails
       - name: Collect diagnostics and artifacts
@@ -462,9 +477,8 @@ jobs:
             cp out/arch/arm64/boot/dtb.img artifacts/
           fi
 
-          if [[ -f Makefile ]]; then
-            make -s ARCH=arm64 O=out kernelrelease \
-              > artifacts/kernel-release.txt 2>&1 || true
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
           fi
 
           git rev-parse HEAD \
@@ -486,7 +500,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KSUN-DEBUGING-fail
+          name: Xen-Kernel-KSUN-Debug-fail
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
