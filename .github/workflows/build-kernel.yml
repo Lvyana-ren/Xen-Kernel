@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16-KSUN_Manual_hook"
+          ref: "16-KSUN-DEBUGING"
           fetch-depth: 1
 
       # 2. Install KSUN first to fail fast
@@ -267,7 +267,31 @@ jobs:
 
           export PATH="$HOME/clang/bin:$PATH"
 
-          make ARCH=arm64 O=out vayu_defconfig
+          # --- DIAGNOSIS LTO: config memakai variabel toolchain yang sama dengan build ---
+          LLVM_VARS=(
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1 LLVM_IAS=1
+          )
+          KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
+
+          lto_state() {
+            echo "----- LTO @ $1 -----"
+            grep -E '^(CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE)=|# CONFIG_(LTO_CLANG|LTO_NONE) is not set)' \
+              "${2:-out/.config}" || echo "(tidak ada baris LTO)"
+          }
+
+          "${KMAKE[@]}" vayu_defconfig
+          lto_state "A  : langsung dari vayu_defconfig (DENGAN variabel toolchain)"
+
+          # Pembanding: cara lama (tanpa variabel toolchain), di folder terpisah.
+          make ARCH=arm64 O=out_noenv vayu_defconfig > /dev/null
+          lto_state "A' : langsung dari vayu_defconfig (TANPA variabel toolchain)" out_noenv/.config
+          rm -rf out_noenv
 
           scripts/config --file out/.config \
             --set-str LOCALVERSION "-Xen-KSUN" \
@@ -284,7 +308,19 @@ jobs:
             --enable THINLTO \
             --disable LTO_NONE
 
-          make ARCH=arm64 O=out olddefconfig
+          lto_state "B  : setelah scripts/config, sebelum olddefconfig"
+
+          "${KMAKE[@]}" olddefconfig
+          lto_state "C  : setelah olddefconfig"
+
+          if ! grep -q '^CONFIG_LTO_CLANG=y' out/.config; then
+            echo "===== LTO_CLANG gugur: cari penyebabnya (kconfig-why) ====="
+            if [ -f scripts/kconfig-why.py ]; then
+              python3 scripts/kconfig-why.py LTO_CLANG THINLTO out/.config || true
+            else
+              echo "scripts/kconfig-why.py tidak ada di repo; salin dulu filenya."
+            fi
+          fi
 
           echo "===== Final LTO config ====="
           grep -E '^(CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE|ARCH_SUPPORTS_LTO_CLANG|ARCH_SUPPORTS_THINLTO)=|# CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE) is not set)' out/.config
@@ -330,7 +366,7 @@ jobs:
           fi
 
           echo "===== Kernel release ====="
-          make ARCH=arm64 O=out kernelrelease
+          "${KMAKE[@]}" kernelrelease
 
       # 10. Compile using baseline compiler arguments
       - name: Compile Xen-Kernel Image
@@ -450,7 +486,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KSUN-Manual-Hook
+          name: Xen-Kernel-KSUN-DEBUGING-fail
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
