@@ -43,10 +43,16 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ -e KernelSU-Next ] || [ -e KernelSU ]; then
-            echo "::error::KSUN source directory already exists."
-            exit 1
-          fi
+          if [ -n "${KSUN_PIN:-}" ]; then
+  git -C KernelSU-Next fetch --tags origin
+  git -C KernelSU-Next rev-parse --verify \
+    "refs/tags/${KSUN_PIN}^{commit}" >/dev/null \
+    || {
+      echo "::error::KSUN tag tidak ditemukan: ${KSUN_PIN}"
+      exit 1
+    }
+  git -C KernelSU-Next switch --detach "${KSUN_PIN}"
+fi
 
           curl -fL --retry 3 \
             "https://raw.githubusercontent.com/Lvyana-ren/KernelSU-Next/dev/kernel/setup.sh" \
