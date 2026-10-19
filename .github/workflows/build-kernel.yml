@@ -42,7 +42,6 @@ jobs:
           KSUN_PIN: "v3.4.1-legacy"
         run: |
           set -euo pipefail
-
           if [ -n "${KSUN_PIN:-}" ]; then
   git -C KernelSU-Next fetch --tags origin
   git -C KernelSU-Next rev-parse --verify \
