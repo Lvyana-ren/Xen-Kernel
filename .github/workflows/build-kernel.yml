@@ -39,7 +39,7 @@ jobs:
         env:
           # Kunci versi: isi dengan HASH COMMIT di lineage legacy (atau tag "v3.4.0-legacy").
           # Kosong = ikut ujung branch legacy (bergerak).
-          KSUN_PIN: ""
+          KSUN_PIN: "v3.4.1-legacy"
         run: |
           set -euo pipefail
 
