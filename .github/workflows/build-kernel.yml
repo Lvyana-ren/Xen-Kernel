@@ -48,7 +48,7 @@ jobs:
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             -o /tmp/ksun-setup.sh
 
-          bash /tmp/ksun-setup.sh legacy
+          bash /tmp/ksun-setup.sh v3.4.0
 
           test -d KernelSU-Next/kernel
           test -e drivers/kernelsu
