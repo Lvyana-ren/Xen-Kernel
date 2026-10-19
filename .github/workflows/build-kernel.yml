@@ -36,6 +36,10 @@ jobs:
       # 2. Install KSUN first to fail fast
       - name: Install KernelSU Next Legacy
         shell: bash
+        env:
+          # Kunci versi: isi dengan HASH COMMIT di lineage legacy (atau tag "v3.4.0-legacy").
+          # Kosong = ikut ujung branch legacy (bergerak).
+          KSUN_PIN: ""
         run: |
           set -euo pipefail
 
@@ -48,14 +52,34 @@ jobs:
             "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
             -o /tmp/ksun-setup.sh
 
-          bash /tmp/ksun-setup.sh v3.4.0
+          # Selalu mulai dari lineage LEGACY (non-GKI). Tag "v3.4.0" tanpa "-legacy"
+          # ada di lineage dev/GKI: tidak punya KSU_MANUAL_HOOK, jadi simbol KSU
+          # hilang dari .config. Untuk mengunci versi, pakai KSUN_PIN di atas.
+          bash /tmp/ksun-setup.sh legacy
+
+          if [ -n "${KSUN_PIN:-}" ]; then
+            git -C KernelSU-Next fetch --tags --unshallow 2>/dev/null \
+              || git -C KernelSU-Next fetch --tags origin
+            git -C KernelSU-Next checkout --detach "$KSUN_PIN"
+          fi
 
           test -d KernelSU-Next/kernel
           test -e drivers/kernelsu
 
+          # Guard fail-fast: pastikan ini memang KSUN legacy dan Kconfig-nya terpasang.
+          if ! grep -q "KSU_MANUAL_HOOK" KernelSU-Next/kernel/Kconfig; then
+            echo "::error::Ref KSUN ini bukan lineage legacy: Kconfig tidak punya KSU_MANUAL_HOOK."
+            exit 1
+          fi
+          if ! grep -q "kernelsu" drivers/Kconfig; then
+            echo "::error::drivers/Kconfig tidak meng-source Kconfig KernelSU."
+            exit 1
+          fi
+
           echo "===== KSUN commit ====="
           git -C KernelSU-Next describe --tags --always
           git -C KernelSU-Next rev-parse HEAD
+          git -C KernelSU-Next log --oneline -3
 
       # 3. Backport path_umount for Linux 4.14
       - name: Backport path_umount
