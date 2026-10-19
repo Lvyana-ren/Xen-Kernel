@@ -49,7 +49,7 @@ jobs:
           fi
 
           curl -fL --retry 3 \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
+            "https://raw.githubusercontent.com/Lvyana-ren/KernelSU-Next/dev/kernel/setup.sh" \
             -o /tmp/ksun-setup.sh
 
           # Selalu mulai dari lineage LEGACY (non-GKI). Tag "v3.4.0" tanpa "-legacy"
