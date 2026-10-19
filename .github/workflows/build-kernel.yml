@@ -54,6 +54,7 @@ jobs:
           test -e drivers/kernelsu
 
           echo "===== KSUN commit ====="
+          git -C KernelSU-Next describe --tags --always
           git -C KernelSU-Next rev-parse HEAD
 
       # 3. Backport path_umount for Linux 4.14
