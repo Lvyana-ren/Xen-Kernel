@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16-KSUN_Manual_hook"
+          ref: "16-KSUN_DEBUGING"
           fetch-depth: 1
 
       # 2. Install KSUN first to fail fast
