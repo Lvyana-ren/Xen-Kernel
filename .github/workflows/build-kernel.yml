@@ -1,5 +1,5 @@
 
-name: Xen-Kernel KSUN DEBUGING 
+name: Xen-Kernel KSUN 
 
 on:
   workflow_dispatch:
@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16-KSUN-DEBUGING"
+          ref: "16-KSUN-MANUAL-HOOK"
           fetch-depth: 1
 
 
