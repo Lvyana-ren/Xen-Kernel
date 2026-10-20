@@ -175,11 +175,8 @@ jobs:
             --enable THINLTO \
             --disable LTO_NONE \
             --enable CC_OPTIMIZE_FOR_PERFORMANCE \
-            --disable CC_OPTIMIZE_FOR_SIZE \
-            --enable CPU_FREQ \
-            --enable CPU_FREQ_GOV_SCHEDUTIL \
-            --enable CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
-
+            --disable CC_OPTIMIZE_FOR_SIZE 
+            
           "${KMAKE[@]}" olddefconfig
 
           echo "===== Effective LTO / optimization / governor configuration ====="
@@ -199,18 +196,7 @@ jobs:
             exit 1
           fi
 
-          if ! grep -q '^CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y$'; then
-            echo "::error::schedutil governor is not enabled in final .config."
-            exit 1
-          fi
-
-          # This kernel tree uses the Kconfig choice to select the default governor.
-          if ! grep -q '^CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y$' out/.config; then
-            echo "::error::schedutil is not selected as the default CPUFreq governor."
-            echo "Inspect CPU_FREQ_DEFAULT_GOV options in this kernel tree."
-            exit 1
-          fi
-
+          
           cp out/.config xen-default.config
           echo "===== Kernel release ====="
           "${KMAKE[@]}" kernelrelease
