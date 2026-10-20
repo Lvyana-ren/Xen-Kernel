@@ -1,5 +1,5 @@
 
-name: Xen-Kernel KSUN Manual Hook Build
+name: Xen-Kernel KSUN DEBUGING 
 
 on:
   workflow_dispatch:
@@ -30,55 +30,41 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16-KSUN_Manual_hook"
+          ref: "16-KSUN-DEBUGING"
           fetch-depth: 1
 
+
       # 2. Install KSUN first to fail fast
-      - name: Install KernelSU Next Legacy
+      - name: Install KernelSU Next Legacy (pinned)
         shell: bash
         env:
-          # Kunci versi: isi dengan HASH COMMIT di lineage legacy (atau tag "v3.4.0-legacy").
-          # Kosong = ikut ujung branch legacy (bergerak).
-          KSUN_PIN: ""
+          KSUN_REPO: "https://github.com/Lvyana-ren/KernelSU-Next"
+          KSUN_SHA: "465490a26667ba4cf00b3be975a7e28e53978829"
         run: |
           set -euo pipefail
+          test ! -e KernelSU-Next
 
-          if [ -e KernelSU-Next ] || [ -e KernelSU ]; then
-            echo "::error::KSUN source directory already exists."
+          # clone penuh, jangan pakai --depth (versi KSU dihitung dari jumlah commit)
+          git clone "$KSUN_REPO" KernelSU-Next
+          git -C KernelSU-Next checkout --detach "$KSUN_SHA"
+
+          ACTUAL="$(git -C KernelSU-Next rev-parse HEAD)"
+          if [ "$ACTUAL" != "$KSUN_SHA" ]; then
+            echo "::error::SHA tidak cocok: $ACTUAL"
             exit 1
           fi
 
-          curl -fL --retry 3 \
-            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" \
-            -o /tmp/ksun-setup.sh
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q kernelsu drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+            sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 
-          # Selalu mulai dari lineage LEGACY (non-GKI). Tag "v3.4.0" tanpa "-legacy"
-          # ada di lineage dev/GKI: tidak punya KSU_MANUAL_HOOK, jadi simbol KSU
-          # hilang dari .config. Untuk mengunci versi, pakai KSUN_PIN di atas.
-          bash /tmp/ksun-setup.sh legacy
+          test -f KernelSU-Next/kernel/Kconfig
+          grep -q "KSU_MANUAL_HOOK" KernelSU-Next/kernel/Kconfig
+          grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig
 
-          if [ -n "${KSUN_PIN:-}" ]; then
-            git -C KernelSU-Next fetch --tags --unshallow 2>/dev/null \
-              || git -C KernelSU-Next fetch --tags origin
-            git -C KernelSU-Next checkout --detach "$KSUN_PIN"
-          fi
-
-          test -d KernelSU-Next/kernel
-          test -e drivers/kernelsu
-
-          # Guard fail-fast: pastikan ini memang KSUN legacy dan Kconfig-nya terpasang.
-          if ! grep -q "KSU_MANUAL_HOOK" KernelSU-Next/kernel/Kconfig; then
-            echo "::error::Ref KSUN ini bukan lineage legacy: Kconfig tidak punya KSU_MANUAL_HOOK."
-            exit 1
-          fi
-          if ! grep -q "kernelsu" drivers/Kconfig; then
-            echo "::error::drivers/Kconfig tidak meng-source Kconfig KernelSU."
-            exit 1
-          fi
-
-          echo "===== KSUN commit ====="
-          git -C KernelSU-Next describe --tags --always
-          git -C KernelSU-Next rev-parse HEAD
+          echo "KSUN tag terdekat: $(git -C KernelSU-Next describe --tags --abbrev=0 || echo TIDAK-ADA)"
           git -C KernelSU-Next log --oneline -3
 
       # 3. Backport path_umount for Linux 4.14
@@ -525,7 +511,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KSUN-Debug-fail
+          name: Xen-Kernel-KSUN
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
