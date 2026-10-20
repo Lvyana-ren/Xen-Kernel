@@ -94,7 +94,7 @@ jobs:
 
     steps:
       # 1. Checkout
-      - name: Checkout Anymore source
+      - name: Checkout Xen source 
         uses: actions/checkout@v4
         with:
           ref: "16"
