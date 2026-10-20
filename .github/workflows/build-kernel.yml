@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16-KSUN-MANUAL-HOOK"
+          ref: "16-KSUN_Manual_hook"
           fetch-depth: 1
 
 
