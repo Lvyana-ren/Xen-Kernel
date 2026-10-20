@@ -35,7 +35,7 @@ jobs:
 
          
       # 2. Install KSUN first to fail fast
-       - name: Install KernelSU Next Legacy (pinned)
+      - name: Install KernelSU Next Legacy (pinned)
         shell: bash
         env:
           KSUN_REPO: "https://github.com/Lvyana-ren/KernelSU-Next"
