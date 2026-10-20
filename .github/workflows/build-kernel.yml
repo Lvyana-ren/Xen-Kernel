@@ -1,18 +1,99 @@
+name: Xen-Kernel - Default Optimized
 
-name: Xen-Kernel - Baseline Build
+# Varian default (tanpa root) + optimasi.
+# Pola LTO/ThinLTO mengikuti varian KSUN:
+#   1. config dibuat dengan variabel toolchain yang SAMA dengan build
+#   2. flag LTO di-enable eksplisit, lalu diverifikasi setelah olddefconfig
+#   3. bukti akhir diambil dari config yang tertanam di Image, bukan dari .config sementara
+# Grup bertanda [Eksperimen] default-nya mati. Nyalakan satu-satu setelah setelan default terbukti boot.
 
 on:
   workflow_dispatch:
+    inputs:
+      thinlto:
+        description: "ThinLTO (LTO_CLANG)"
+        type: boolean
+        default: true
+      opt_o2:
+        description: "Optimasi -O2 (ganti -Os)"
+        type: boolean
+        default: true
+      governor:
+        description: "Governor default schedutil (ganti performance)"
+        type: boolean
+        default: true
+      net_bbr:
+        description: "Sediakan BBR + fq/fq_codel (default tetap cubic)"
+        type: boolean
+        default: true
+      zram_lz4:
+        description: "zram LZ4 (diaktifkan + jadi default)"
+        type: boolean
+        default: true
+      debug_trim:
+        description: "Pangkas debug ringan (DEBUG_LIST/NOTIFIERS, IPC_LOGGING, KALLSYMS_ALL, DEBUG_INFO)"
+        type: boolean
+        default: true
+      lse:
+        description: "[Eksperimen] LSE atomics"
+        type: boolean
+        default: false
+      mq_io:
+        description: "[Eksperimen] blk-mq untuk UFS + Kyber/BFQ/WBT"
+        type: boolean
+        default: false
+      bbr_default:
+        description: "[Eksperimen] BBR jadi default (butuh net_bbr aktif)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
+concurrency:
+  group: xen-default-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 360
+    timeout-minutes: 120
+
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+      CCACHE_COMPILERCHECK: "%compiler% --version"
+      KBUILD_BUILD_USER: Lvyana
+      KBUILD_BUILD_HOST: Xen-Kernel
+
+      # Variabel toolchain: dipakai SAMA PERSIS untuk config dan build.
+      # CC sengaja tidak di sini (config: CC=clang, build: CC="ccache clang").
+      LLVM_FLAGS: >-
+        DTC_EXT=dtc
+        CLANG_TRIPLE=aarch64-linux-gnu-
+        CROSS_COMPILE=aarch64-linux-gnu-
+        CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+        CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+        LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip
+        OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
+        HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld
+        LLVM=1 LLVM_IAS=1
+
+      # Toggle dari input
+      G_LTO: ${{ inputs.thinlto }}
+      G_O2: ${{ inputs.opt_o2 }}
+      G_GOV: ${{ inputs.governor }}
+      G_NET: ${{ inputs.net_bbr }}
+      G_ZRAM: ${{ inputs.zram_lz4 }}
+      G_TRIM: ${{ inputs.debug_trim }}
+      G_LSE: ${{ inputs.lse }}
+      G_MQIO: ${{ inputs.mq_io }}
+      G_BBRDEF: ${{ inputs.bbr_default }}
 
     steps:
+      # 1. Checkout
       - name: Checkout Anymore source
         uses: actions/checkout@v4
         with:
@@ -20,11 +101,13 @@ jobs:
           fetch-depth: 1
           lfs: true
 
+      # 2. Dependencies
       - name: Install build dependencies
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             bc bison build-essential ccache \
             clang flex git libelf-dev libssl-dev \
             lld llvm make python3 rsync \
@@ -34,28 +117,55 @@ jobs:
             binutils-aarch64-linux-gnu \
             binutils-arm-linux-gnueabi \
             libncurses-dev \
-            lz4 zip wget xz-utils
+            lz4 zip wget xz-utils file
+
+      # 3. Cache (kunci Clang sama dengan varian KSUN)
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ${{ runner.os }}-xen-default-ccache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-xen-default-ccache-
+
+      - name: Restore Clang cache
+        uses: actions/cache@v4
+        with:
+          path: ~/clang
+          key: ${{ runner.os }}-xen-clang-r547379-branch15.0-v1
 
       - name: Prepare upstream Clang
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          mkdir -p "$HOME/clang"
+          if [ ! -x "$HOME/clang/bin/clang" ] ||
+             [ ! -x "$HOME/clang/bin/ld.lld" ]; then
 
-          git clone --depth=1 \
-            --single-branch \
-            --branch 15.0 \
-            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
-            "$HOME/clang"
+            rm -rf "$HOME/clang"
+
+            git clone --depth=1 \
+              --single-branch \
+              --branch 15.0 \
+              https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
+              "$HOME/clang"
+
+            rm -rf "$HOME/clang/.git"
+          fi
 
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
 
           echo "=== Clang version ==="
           "$HOME/clang/bin/clang" --version
 
+          echo "=== LLD version ==="
+          "$HOME/clang/bin/ld.lld" --version
+
+      # 4. Validasi source
       - name: Check source and toolchains
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "=== Source commit ==="
           git log -1 --oneline
@@ -70,85 +180,239 @@ jobs:
           test -f scripts/config
 
           echo "=== GCC64 ==="
-          aarch64-linux-gnu-gcc --version
+          aarch64-linux-gnu-gcc --version | head -n1
 
           echo "=== GCC32 ==="
-          arm-linux-gnueabi-gcc --version
+          arm-linux-gnueabi-gcc --version | head -n1
 
-          echo "=== LLVM tools ==="
-          "$HOME/clang/bin/clang" --version
-          "$HOME/clang/bin/ld.lld" --version
-          "$HOME/clang/bin/llvm-ar" --version
+          echo "=== Clang / LLD / llvm-ar (dari PATH) ==="
+          clang --version | head -n1
+          ld.lld --version
+          llvm-ar --version | head -n1
 
-      - name: Generate baseline defconfig
-        run: |
-          set -e
-
-          export ARCH=arm64
-          export PATH="$HOME/clang/bin:$PATH"
-
-          make ARCH=arm64 O=out vayu_defconfig
-
-          # Set Xen-Kernel version suffix
-          scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen"
-
-          scripts/config --file out/.config \
-            --disable LOCALVERSION_AUTO
-
-          make ARCH=arm64 O=out olddefconfig
-
-          # Save the final configuration
-          cp out/.config baseline.config
-
-          echo "=== Kernel version ==="
-          make kernelversion
-
-          echo "=== Kernel release ==="
-          make ARCH=arm64 O=out kernelrelease
-
-          echo "=== Local version ==="
-          grep '^CONFIG_LOCALVERSION=' out/.config
-
-      - name: Compile kernel
+      # 5. Config + grup optimasi
+      - name: Generate optimized defconfig
+        shell: bash
         run: |
           set -euo pipefail
 
-          export ARCH=arm64
-          export SUBARCH=arm64
           export PATH="$HOME/clang/bin:$PATH"
-          export KBUILD_BUILD_USER="Lvyana"
-          export KBUILD_BUILD_HOST="Xen-Kernel"
+          mkdir -p out
 
+          # --- helper verifikasi (dipakai lagi nanti terhadap config tertanam di Image) ---
+          cat > out/verify-config.sh <<'EOF'
+          # pakai: verify_config <file-config> <file-expect> <output.md> <judul>
+          # hasil jumlah opsi yang tidak sesuai ada di variabel VERIFY_MISS
+          verify_config() {
+            local cfgfile="$1" expfile="$2" md="$3" title="$4" exp name r
+            VERIFY_MISS=0
+            {
+              echo "### $title"
+              echo ""
+              echo "| Opsi | Diminta | Hasil |"
+              echo "|---|---|---|"
+            } > "$md"
+            while read -r exp name; do
+              [ -n "${name:-}" ] || continue
+              if [ "$exp" = y ]; then
+                if grep -qx "CONFIG_${name}=y" "$cfgfile"; then
+                  r="✅ aktif"
+                else
+                  r="⚠️ TIDAK masuk"; VERIFY_MISS=$((VERIFY_MISS+1))
+                fi
+              else
+                if grep -qE "^CONFIG_${name}=(y|m)$" "$cfgfile"; then
+                  r="⚠️ masih aktif"; VERIFY_MISS=$((VERIFY_MISS+1))
+                else
+                  r="✅ mati"
+                fi
+              fi
+              echo "| $name | $exp | $r |" >> "$md"
+            done < "$expfile"
+          }
+          EOF
+
+          # Config memakai variabel toolchain yang SAMA dengan build (pelajaran varian KSUN)
+          KMAKE=(make ARCH=arm64 O=out CC=clang $LLVM_FLAGS)
+
+          lto_state() {
+            echo "----- LTO @ $1 -----"
+            grep -E '^(CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE)=|# CONFIG_(LTO_CLANG|LTO_NONE) is not set)' \
+              out/.config || echo "(tidak ada baris LTO)"
+          }
+
+          "${KMAKE[@]}" vayu_defconfig
+          cp out/.config out/.config.base
+          lto_state "A: langsung dari vayu_defconfig"
+
+          cfg()  { scripts/config --file out/.config "$@"; }
+          want() { echo "$1 $2" >> out/expect.txt; }   # want y|n NAMA_OPSI
+          : > out/expect.txt
+
+          # --- versi Xen-Kernel (sama seperti baseline lama) ---
+          cfg --set-str LOCALVERSION "-Xen" --disable LOCALVERSION_AUTO
+
+          # --- ThinLTO: flag yang sama dengan varian KSUN ---
+          if [ "$G_LTO" = true ]; then
+            cfg --enable LTO_CLANG --enable LTO --enable THINLTO --disable LTO_NONE
+            want y LTO
+            want y LTO_CLANG
+            want y THINLTO
+            want n LTO_NONE
+          fi
+
+          # --- -O2 (ganti -Os) ---
+          if [ "$G_O2" = true ]; then
+            cfg --disable CC_OPTIMIZE_FOR_SIZE --enable CC_OPTIMIZE_FOR_PERFORMANCE
+            want n CC_OPTIMIZE_FOR_SIZE
+          fi
+
+          # --- governor default ---
+          if [ "$G_GOV" = true ]; then
+            cfg --disable CPU_FREQ_DEFAULT_GOV_PERFORMANCE \
+                --enable CPU_FREQ_GOV_SCHEDUTIL \
+                --enable CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
+            want y CPU_FREQ_DEFAULT_GOV_SCHEDUTIL
+            want n CPU_FREQ_DEFAULT_GOV_PERFORMANCE
+          fi
+
+          # --- jaringan: BBR + fq/fq_codel tersedia ---
+          if [ "$G_NET" = true ]; then
+            cfg --enable TCP_CONG_ADVANCED --enable TCP_CONG_BBR \
+                --enable NET_SCH_FQ --enable NET_SCH_FQ_CODEL
+            # TCP_CONG_ADVANCED membuka algoritma lain yang default-nya =m; matikan biar tidak jadi modul nganggur
+            cfg --disable TCP_CONG_BIC --disable TCP_CONG_WESTWOOD --disable TCP_CONG_HTCP
+            want y TCP_CONG_BBR
+            want y NET_SCH_FQ
+            want y NET_SCH_FQ_CODEL
+            if [ "$G_BBRDEF" = true ]; then
+              cfg --enable DEFAULT_BBR --disable DEFAULT_CUBIC
+              want y DEFAULT_BBR
+            fi
+          fi
+
+          # --- zram LZ4 ---
+          if [ "$G_ZRAM" = true ]; then
+            cfg --enable CRYPTO_LZ4
+            want y CRYPTO_LZ4
+            f=drivers/block/zram/zram_drv.c
+            if grep -q 'default_compressor = "lzo"' "$f"; then
+              sed -i 's/default_compressor = "lzo"/default_compressor = "lz4"/' "$f"
+              echo "zram: default compressor -> lz4"
+            else
+              echo "::warning::zram_drv.c tidak punya default_compressor lzo; LZ4 tersedia tapi userspace harus memilihnya (echo lz4 > /sys/block/zram0/comp_algorithm)"
+            fi
+          fi
+
+          # --- pangkas debug ringan ---
+          if [ "$G_TRIM" = true ]; then
+            cfg --disable DEBUG_LIST --disable DEBUG_NOTIFIERS --disable IPC_LOGGING \
+                --disable KALLSYMS_ALL --disable DEBUG_INFO
+            want n DEBUG_LIST
+            want n DEBUG_NOTIFIERS
+            want n IPC_LOGGING
+            want n KALLSYMS_ALL
+            want n DEBUG_INFO
+          fi
+
+          # --- [eksperimen] LSE atomics ---
+          if [ "$G_LSE" = true ]; then
+            cfg --enable ARM64_LSE_ATOMICS
+            want y ARM64_LSE_ATOMICS
+          fi
+
+          # --- [eksperimen] blk-mq UFS ---
+          if [ "$G_MQIO" = true ]; then
+            cfg --enable SCSI_MQ_DEFAULT --enable MQ_IOSCHED_DEADLINE --enable MQ_IOSCHED_KYBER \
+                --enable IOSCHED_BFQ --enable BFQ_GROUP_IOSCHED --enable BLK_WBT --enable BLK_WBT_MQ
+            want y SCSI_MQ_DEFAULT
+            want y MQ_IOSCHED_KYBER
+            want y IOSCHED_BFQ
+            want y BLK_WBT
+          fi
+
+          lto_state "B: setelah scripts/config, sebelum olddefconfig"
+
+          "${KMAKE[@]}" olddefconfig
+          lto_state "C: setelah olddefconfig"
+
+          # --- ThinLTO yang diminta tapi gugur: hentikan + tunjukkan penyebabnya ---
+          if [ "$G_LTO" = true ]; then
+            if ! grep -q '^CONFIG_LTO=y$' out/.config ||
+               ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+               ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+               grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+              echo "===== LTO gugur: definisi Kconfig dan opsi terkait ====="
+              for k in arch/Kconfig init/Kconfig; do
+                grep -n -A16 -E '^config (LTO_CLANG|THINLTO)$' "$k" 2>/dev/null || true
+              done
+              grep -E 'FTRACE_MCOUNT_RECORD|KASAN|MODVERSIONS|GCOV' out/.config || true
+              if [ -f scripts/kconfig-why.py ]; then
+                python3 scripts/kconfig-why.py LTO_CLANG THINLTO out/.config || true
+              fi
+              echo "::error::ThinLTO is not enabled in final .config"
+              exit 1
+            fi
+          fi
+
+          # --- verifikasi semua opsi yang diminta ---
+          source out/verify-config.sh
+          verify_config out/.config out/expect.txt out/verify-config.md "Verifikasi .config (sebelum build)"
+          cat out/verify-config.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$VERIFY_MISS" -gt 0 ]; then
+            echo "::warning::$VERIFY_MISS opsi tidak sesuai permintaan, lihat tabel di Summary."
+          fi
+
+          diff <(grep -E '^(# )?CONFIG_' out/.config.base | sort) \
+               <(grep -E '^(# )?CONFIG_' out/.config | sort) > out/config.diff || true
+
+          echo "===== Effective configuration ====="
+          grep -E '^CONFIG_(LOCALVERSION|CC_OPTIMIZE_FOR_[A-Z]+|CPU_FREQ_DEFAULT_GOV_[A-Z]+|TCP_CONG_BBR|DEFAULT_TCP_CONG|NET_SCH_FQ(_CODEL)?|CRYPTO_LZ4|ARM64_LSE_ATOMICS|SCSI_MQ_DEFAULT|IOSCHED_BFQ|DEBUG_INFO|KALLSYMS_ALL)=' \
+            out/.config || true
+
+          echo "===== Kernel version / release ====="
+          make kernelversion
+          "${KMAKE[@]}" kernelrelease
+
+      # 6. Compile (argumen sama dengan baseline lama, default target)
+      - name: Compile kernel
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          export PATH="$HOME/clang/bin:$PATH"
+
+          SECONDS=0
+          set +e
           make -j"$(nproc)" \
             O=out \
             ARCH=arm64 \
             SUBARCH=arm64 \
-            DTC_EXT=dtc \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            STRIP=llvm-strip \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            READELF=llvm-readelf \
-            HOSTCC=clang \
-            HOSTCXX=clang++ \
-            HOSTAR=llvm-ar \
-            HOSTLD=ld.lld \
-            LLVM=1 \
-            LLVM_IAS=1 \
             CC="ccache clang" \
+            $LLVM_FLAGS \
             2>&1 | tee build.log
 
-      - name: Verify kernel image
-        if: success()
-        run: |
+          BUILD_STATUS=${PIPESTATUS[0]}
           set -e
+
+          ccache -s || true
+
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== 25 baris error pertama dari build.log ====="
+            grep -n -m 25 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            echo "::error::Kernel compilation failed."
+            exit "$BUILD_STATUS"
+          fi
+
+          echo "Build selesai dalam $((SECONDS/60)) menit"
+
+      # 7. Verifikasi dari HASIL build
+      - name: Verify kernel image
+        id: info
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
 
           IMAGE="out/arch/arm64/boot/Image"
 
@@ -159,10 +423,11 @@ jobs:
 
           echo "=== Kernel image ==="
           file "$IMAGE"
-          ls -lh "$IMAGE"
+          ls -lh out/arch/arm64/boot/Image*
 
-          echo "=== Final kernel release ==="
-          make ARCH=arm64 O=out kernelrelease
+          # Baca file hasil build; jangan panggil make lagi tanpa variabel toolchain.
+          KVER="$(cat out/include/config/kernel.release)"
+          echo "=== Final kernel release === $KVER"
 
           echo "=== Available build outputs ==="
           find out/arch/arm64/boot \
@@ -170,28 +435,93 @@ jobs:
             \( -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" \) \
             -print
 
-      - name: Upload baseline artifacts
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Xen-Kernel-baseline
-          if-no-files-found: error
-          path: |
-            out/arch/arm64/boot/Image
-            out/arch/arm64/boot/Image.gz
-            out/arch/arm64/boot/dtbo.img
-            out/arch/arm64/boot/dtb.img
-            out/.config
-            baseline.config
-            build.log
+          # --- ekstrak config yang tertanam di Image ---
+          python3 - "$IMAGE" out/ikconfig.txt <<'PY'
+          import sys, zlib
+          d = open(sys.argv[1], 'rb').read()
+          i = d.find(b'IKCFG_ST')
+          if i < 0:
+              sys.exit('IKCFG_ST tidak ditemukan (CONFIG_IKCONFIG mati?)')
+          cfg = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(d[i + 8:i + 8 + 1500000])
+          open(sys.argv[2], 'wb').write(cfg)
+          print('ikconfig tertanam: %d byte' % len(cfg))
+          PY
 
-      - name: Upload diagnostics on failure
-        if: failure()
+          echo "=== LTO di config tertanam ==="
+          grep -E '^(CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE)=|# CONFIG_LTO_CLANG is not set)' \
+            out/ikconfig.txt || echo "(tidak ada baris LTO)"
+
+          LLVM_SYMS="$(grep -c '\.llvm\.' out/System.map || true)"
+          echo "simbol .llvm. di System.map: $LLVM_SYMS  (>0 = ThinLTO)"
+
+          if [ "$G_LTO" = true ]; then
+            if ! grep -q '^CONFIG_LTO_CLANG=y$' out/ikconfig.txt; then
+              echo "::error::ThinLTO diminta tapi TIDAK ada di config tertanam Image."
+              exit 1
+            fi
+            if [ "$LLVM_SYMS" -eq 0 ]; then
+              echo "::warning::Config bilang LTO aktif, tapi tidak ada simbol .llvm. di System.map."
+            fi
+          fi
+
+          # --- bukti akhir: opsi yang diminta vs config di dalam Image ---
+          source out/verify-config.sh
+          verify_config out/ikconfig.txt out/expect.txt out/verify-image.md "Verifikasi config tertanam di Image (bukti akhir)"
+          cat out/verify-image.md >> "$GITHUB_STEP_SUMMARY"
+          if [ "$VERIFY_MISS" -gt 0 ]; then
+            echo "::warning::$VERIFY_MISS opsi tidak sesuai di config tertanam Image."
+          fi
+
+          # --- nama artifact memuat opsi yang aktif ---
+          TAGS=""
+          t() { if [ "$2" = true ]; then TAGS="${TAGS}-$1"; fi; }
+          t lto "$G_LTO"; t o2 "$G_O2"; t sched "$G_GOV"; t bbr "$G_NET"
+          t lz4 "$G_ZRAM"; t trim "$G_TRIM"; t lse "$G_LSE"; t mqio "$G_MQIO"
+          echo "name=Xen-Kernel-default${TAGS}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo ""
+            echo "### Hasil build"
+            echo "- Versi: \`$KVER\`"
+            echo "- Image: $(stat -c %s "$IMAGE" | numfmt --to=iec)"
+            [ ! -s out/arch/arm64/boot/Image.gz ] || echo "- Image.gz: $(stat -c %s out/arch/arm64/boot/Image.gz | numfmt --to=iec)"
+            echo "- sha256 Image: \`$(sha256sum "$IMAGE" | cut -d' ' -f1)\`"
+            echo "- Simbol .llvm.: $LLVM_SYMS"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 8. Kumpulkan artifact (juga saat gagal)
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          mkdir -p artifacts
+
+          for f in build.log \
+                   out/.config.base out/config.diff \
+                   out/verify-config.md out/verify-image.md out/ikconfig.txt \
+                   out/arch/arm64/boot/Image out/arch/arm64/boot/Image.gz \
+                   out/arch/arm64/boot/dtbo.img out/arch/arm64/boot/dtb.img; do
+            if [ -s "$f" ]; then cp "$f" artifacts/; fi
+          done
+
+          [ ! -f out/.config ] || cp out/.config artifacts/kernel.config
+          [ ! -f out/include/config/kernel.release ] || \
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+
+          echo "===== Artifacts ====="
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-kernel-diagnostics
+          name: ${{ steps.info.outputs.name || 'Xen-Kernel-default-gagal' }}
+          path: artifacts/
           if-no-files-found: warn
-          path: |
-            build.log
-            baseline.config
-            out/.config
+          retention-days: 7
