@@ -34,68 +34,37 @@ jobs:
           fetch-depth: 1
 
       
-      # 2. Install KSUN first to fail fast
-      - name: Install KernelSU Next Legacy
+            - name: Install KernelSU Next Legacy (pinned)
         shell: bash
         env:
-          # Pin ke revisi KSUN yang ingin diuji.
-          KSUN_PIN: "v3.4.1-legacy"
+          KSUN_REPO: "https://github.com/Lvyana-ren/KernelSU-Next"
+          KSUN_SHA: "c81cdf51c3bb606836c6fc9a7cc858053eb0bc62"
         run: |
           set -euo pipefail
+          test ! -e KernelSU-Next
 
-          if [ -e KernelSU-Next ] || [ -e KernelSU ]; then
-            echo "::error::KSUN source directory already exists."
+          # clone penuh, jangan pakai --depth (versi KSU dihitung dari jumlah commit)
+          git clone "$KSUN_REPO" KernelSU-Next
+          git -C KernelSU-Next checkout --detach "$KSUN_SHA"
+
+          ACTUAL="$(git -C KernelSU-Next rev-parse HEAD)"
+          if [ "$ACTUAL" != "$KSUN_SHA" ]; then
+            echo "::error::SHA tidak cocok: $ACTUAL"
             exit 1
           fi
 
-          # Ambil setup script dari fork Xen.
-          curl -fL --retry 3 \
-            "https://raw.githubusercontent.com/Lvyana-ren/KernelSU-Next/dev/kernel/setup.sh" \
-            -o /tmp/ksun-setup.sh
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q kernelsu drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+            sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 
-          # Pasang integrasi legacy untuk kernel non-GKI.
-          bash /tmp/ksun-setup.sh legacy
+          test -f KernelSU-Next/kernel/Kconfig
+          grep -q "KSU_MANUAL_HOOK" KernelSU-Next/kernel/Kconfig
+          grep -q "drivers/kernelsu/Kconfig" drivers/Kconfig
 
-          # Pin source setelah setup selesai.
-          if [ -n "${KSUN_PIN:-}" ]; then
-            echo "===== Fetch KSUN tags ====="
-            git -C KernelSU-Next fetch --tags origin
-
-            echo "===== Verify requested KSUN revision ====="
-            if ! git -C KernelSU-Next rev-parse --verify \
-              "${KSUN_PIN}^{commit}" >/dev/null 2>&1; then
-              echo "::error::KSUN revision tidak ditemukan: ${KSUN_PIN}"
-              echo "Tag yang tersedia:"
-              git -C KernelSU-Next tag --list '*legacy*'
-              exit 1
-            fi
-
-            echo "===== Checkout pinned KSUN revision ====="
-            git -C KernelSU-Next switch --detach "${KSUN_PIN}"
-          fi
-
-          # Pastikan source dan integrasi tersedia.
-          test -d KernelSU-Next/kernel
-          test -e drivers/kernelsu
-
-          if ! grep -q "KSU_MANUAL_HOOK" KernelSU-Next/kernel/Kconfig; then
-            echo "::error::Ref KSUN ini tidak menyediakan KSU_MANUAL_HOOK."
-            exit 1
-          fi
-
-          if ! grep -q "kernelsu" drivers/Kconfig; then
-            echo "::error::drivers/Kconfig tidak meng-source Kconfig KernelSU."
-            exit 1
-          fi
-
-          echo "===== KSUN source remote ====="
-          git -C KernelSU-Next remote get-url origin
-
-          echo "===== KSUN commit ====="
-          git -C KernelSU-Next describe --tags --always
-          git -C KernelSU-Next rev-parse HEAD
+          echo "KSUN tag terdekat: $(git -C KernelSU-Next describe --tags --abbrev=0 || echo TIDAK-ADA)"
           git -C KernelSU-Next log --oneline -3
-
 
       # 3. Backport path_umount for Linux 4.14
       - name: Backport path_umount
