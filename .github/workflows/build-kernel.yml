@@ -39,7 +39,7 @@ jobs:
         shell: bash
         env:
           KSUN_REPO: "https://github.com/Lvyana-ren/KernelSU-Next"
-          KSUN_SHA: "c81cdf51c3bb606836c6fc9a7cc858053eb0bc62"
+          KSUN_SHA: "465490a26667ba4cf00b3be975a7e28e53978829"
         run: |
           set -euo pipefail
           test ! -e KernelSU-Next
