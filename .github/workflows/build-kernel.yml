@@ -22,7 +22,7 @@ jobs:
       CCACHE_MAXSIZE: 2G
       CCACHE_COMPILERCHECK: "%compiler% --version"
       KBUILD_BUILD_USER: Lvyana
-      KBUILD_BUILD_HOST: Xen-Kernel
+      KBUILD_BUILD_HOST: Xen-Kernel+1
 
     steps:
       - name: Checkout Xen-Kernel source
@@ -200,6 +200,27 @@ jobs:
           cp out/.config xen-default.config
           echo "===== Kernel release ====="
           "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
 
       - name: Compile Xen-Kernel Image
         shell: bash
