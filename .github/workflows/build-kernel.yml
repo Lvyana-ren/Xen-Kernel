@@ -22,7 +22,7 @@ jobs:
       CCACHE_MAXSIZE: 2G
       CCACHE_COMPILERCHECK: "%compiler% --version"
       KBUILD_BUILD_USER: Lvyana
-      KBUILD_BUILD_HOST: Xen-Kernel+1
+      KBUILD_BUILD_HOST: Xen-Kernel
 
     steps:
       - name: Checkout Xen-Kernel source
@@ -168,7 +168,7 @@ jobs:
           "${KMAKE[@]}" vayu_defconfig
 
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen" \
+            --set-str LOCALVERSION "-Xen+1" \
             --disable LOCALVERSION_AUTO \
             --enable LTO \
             --enable LTO_CLANG \
