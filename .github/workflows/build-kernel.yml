@@ -270,6 +270,28 @@ jobs:
           echo "===== LLD ====="
           ld.lld --version
 
+
+      # 8b. Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
       # 9. Generate configuration
       - name: Configure KSUN manual hook without KPROBES
         shell: bash
@@ -403,10 +425,6 @@ jobs:
           echo "===== Kernel release ====="
           "${KMAKE[@]}" kernelrelease
 
-
-
-          echo "===== Kernel release ====="
-          "${KMAKE[@]}" kernelrelease
 
       # 10. Compile using baseline compiler arguments
       - name: Compile Xen-Kernel Image
