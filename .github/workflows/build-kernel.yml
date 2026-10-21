@@ -380,6 +380,12 @@ jobs:
             exit 1
           fi
 
+          if grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
           echo "===== Kernel release ====="
           "${KMAKE[@]}" kernelrelease
 
