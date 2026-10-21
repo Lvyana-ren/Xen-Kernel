@@ -317,7 +317,9 @@ jobs:
             --enable LTO_CLANG \
             --enable LTO \
             --enable THINLTO \
-            --disable LTO_NONE
+            --disable LTO_NONE \
+            --enable CC_OPTIMIZE_FOR_PERFORMANCE \
+            --disable CC_OPTIMIZE_FOR_SIZE 
 
           lto_state "B  : setelah scripts/config, sebelum olddefconfig"
 
