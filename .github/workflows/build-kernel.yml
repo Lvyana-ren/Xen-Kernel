@@ -327,7 +327,7 @@ jobs:
           rm -rf out_noenv
 
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen-KSUN" \
+            --set-str LOCALVERSION "-Xen-KSUN+1" \
             --disable LOCALVERSION_AUTO \
             --enable MODULES \
             --disable KPROBES \
