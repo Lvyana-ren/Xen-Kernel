@@ -380,11 +380,30 @@ jobs:
             exit 1
           fi
 
-          if grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
-             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
-            echo "::error::-O2 performance optimization is not selected in final .config."
+          
+
+          echo "===== Validate compiler optimization config ====="
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config; then
+            echo "::error::CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE is not enabled."
             exit 1
           fi
+
+          if grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$' out/.config; then
+            echo "::error::CONFIG_CC_OPTIMIZE_FOR_SIZE is enabled."
+            exit 1
+          fi
+
+          echo "PASS: Performance optimization selected; size optimization disabled."
+
+          grep -E \
+            '^CONFIG_CC_OPTIMIZE_FOR_(PERFORMANCE|SIZE)=y$|^# CONFIG_CC_OPTIMIZE_FOR_(PERFORMANCE|SIZE) is not set$' \
+            out/.config || true
+
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+
 
           echo "===== Kernel release ====="
           "${KMAKE[@]}" kernelrelease
