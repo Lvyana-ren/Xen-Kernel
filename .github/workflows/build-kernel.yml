@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16-KSUN_Manual_hook"
+          ref: "16-KSUN_SuSFS"
           fetch-depth: 1
 
 
@@ -177,6 +177,92 @@ jobs:
           grep -n 'ksu_handle_sys_reboot' kernel/reboot.c
 
           git diff --check
+
+      
+      # 4b. Check the current SUSFS integration state before patching
+      - name: Inspect SUSFS baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== Existing SUSFS files ====="
+          for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
+            if [ -f "$f" ]; then
+              echo "FOUND: $f"
+            else
+              echo "MISSING: $f"
+            fi
+          done
+
+          echo "===== Existing SUSFS symbols ====="
+          grep -R -n -E \
+            'SUSFS_VERSION|CONFIG_KSU_SUSFS|susfs_get_enabled_features' \
+            fs include/linux arch/arm64/configs/vayu_defconfig \
+            || true
+
+          echo "===== Existing source changes ====="
+          git status --short
+          git diff --check
+
+
+      - name: Generate SUSFS integration diff
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REF_DIR="$RUNNER_TEMP/anymore-reference"
+
+          git clone \
+            --no-checkout \
+            https://github.com/AnymoreProject/android_kernel_vayu.git \
+            "$REF_DIR"
+
+          git -C "$REF_DIR" fetch --no-tags origin \
+            refs/heads/16:refs/remotes/origin/16 \
+            refs/heads/16-ksu:refs/remotes/origin/16-ksu
+
+          BASE="$(git -C "$REF_DIR" rev-parse refs/remotes/origin/16)"
+          SUSFS="$(git -C "$REF_DIR" rev-parse refs/remotes/origin/16-ksu)"
+
+          echo "Anymore base: $BASE"
+          echo "Anymore KSU:  $SUSFS"
+
+          mkdir -p susfs-audit
+
+          git -C "$REF_DIR" diff \
+            --stat "$BASE" "$SUSFS" \
+            > susfs-audit/diff-stat.txt
+
+          git -C "$REF_DIR" diff \
+            --name-status "$BASE" "$SUSFS" \
+            > susfs-audit/changed-files.txt
+
+          git -C "$REF_DIR" diff \
+            --no-ext-diff "$BASE" "$SUSFS" \
+            -- fs include/linux include/uapi \
+               drivers/Kconfig drivers/Makefile \
+               arch/arm64/configs \
+            > susfs-audit/kernel-integration.diff
+
+          echo "===== Changed files ====="
+          cat susfs-audit/changed-files.txt
+
+          echo "===== Diff summary ====="
+          cat susfs-audit/diff-stat.txt
+
+          echo "===== SUSFS-related files ====="
+          grep -iE 'susfs|sus_' \
+            susfs-audit/changed-files.txt || true
+
+      - name: Upload SUSFS audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-SUSFS-Audit
+          path: susfs-audit/
+          if-no-files-found: warn
+          retention-days: 7
+
 
       # 5. Install build dependencies
       - name: Install build dependencies
