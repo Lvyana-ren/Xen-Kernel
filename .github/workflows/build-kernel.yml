@@ -430,7 +430,27 @@ jobs:
             exit 1
           fi
 
-          if ! grep -q '^CONFIG_KSU_SUSFS=y
+          if ! grep -q '^CONFIG_KSU_SUSFS=y$' out/.config; then
+            echo "::error::CONFIG_KSU_SUSFS is not enabled."
+            exit 1
+          fi
+
+          for susfs_opt in \
+            KSU_SUSFS_SUS_PATH \
+            KSU_SUSFS_SUS_MOUNT \
+            KSU_SUSFS_SUS_KSTAT \
+            KSU_SUSFS_TRY_UMOUNT \
+            KSU_SUSFS_SPOOF_UNAME \
+            KSU_SUSFS_ENABLE_LOG \
+            KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            KSU_SUSFS_OPEN_REDIRECT \
+            KSU_SUSFS_SUS_MAP; do
+            if ! grep -q "^CONFIG_${susfs_opt}=y$" out/.config; then
+              echo "::error::CONFIG_${susfs_opt} is not enabled after olddefconfig."
+              exit 1
+            fi
+          done
 
           if grep -q '^CONFIG_KPROBES=y' out/.config; then
             echo "::error::KPROBES was re-enabled by Kconfig."
