@@ -2,100 +2,226 @@ name: Xen-Kernel - Stage SUSFS sources (Linux 4.14 audit)
 
 on:
   workflow_dispatch:
+    inputs:
+      target_branch:
+        description: "Xen-Kernel branch to update"
+        required: true
+        type: choice
+        default: "16-KSUN_SuSFS"
+        options:
+          - "16-KSUN_SuSFS"
 
 permissions:
   contents: write
 
 concurrency:
-  group: xen-susfs-source-import-16-KSUN_SuSFS
+  group: xen-susfs-stage-${{ inputs.target_branch }}
   cancel-in-progress: false
 
 jobs:
-  import-susfs-sources:
+  stage-susfs:
+    name: Audit and stage SUSFS sources
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 20
+
+    env:
+      TARGET_BRANCH: ${{ inputs.target_branch }}
+      SOURCE_REPO: https://github.com/Lvyana-ren/Xen-SuSFS.git
+      SOURCE_BRANCH: 16-ksu
+      REFERENCE_REPO: https://gitlab.com/simonpunk/susfs4ksu.git
+      REFERENCE_BRANCH: master
+      PATCH_PATH: kernel_patches/50_add_susfs_in_kernel-4.14.patch
 
     steps:
+      # ============================================================
+      # 1. Checkout target branch, not the workflow's default branch.
+      # ============================================================
       - name: Checkout Xen-Kernel target branch
         uses: actions/checkout@v4
         with:
-          ref: 16-KSUN_SuSFS
+          ref: ${{ inputs.target_branch }}
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Prepare audit directory
         shell: bash
-        run: mkdir -p susfs-audit
+        run: |
+          set -euo pipefail
 
-      - name: Fetch Xen-SuSFS source branch
+          mkdir -p susfs-audit
+
+          {
+            echo "Target repository: Lvyana-ren/Xen-Kernel"
+            echo "Target branch: ${TARGET_BRANCH}"
+            echo "Target commit: $(git rev-parse HEAD)"
+            echo "Target commit subject: $(git log -1 --pretty=%s)"
+            echo "Kernel patch reference: ${PATCH_PATH}"
+            echo "Patch application mode: CHECK ONLY"
+            echo
+          } | tee susfs-audit/target-revision.txt
+
+      # ============================================================
+      # 2. Obtain the selected Xen-SuSFS source.
+      # ============================================================
+      - name: Fetch Xen-SuSFS source
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth=1 --single-branch --branch 16-ksu \
-            https://github.com/Lvyana-ren/Xen-SuSFS.git \
+
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "${SOURCE_BRANCH}" \
+            "${SOURCE_REPO}" \
             "$RUNNER_TEMP/Xen-SuSFS"
 
           SRC="$RUNNER_TEMP/Xen-SuSFS"
+
           {
-            echo "Repository: https://github.com/Lvyana-ren/Xen-SuSFS"
-            echo "Branch: 16-ksu"
+            echo "Repository: ${SOURCE_REPO}"
+            echo "Branch: ${SOURCE_BRANCH}"
             echo "Commit: $(git -C "$SRC" rev-parse HEAD)"
             echo "Commit subject: $(git -C "$SRC" log -1 --pretty=%s)"
             echo
-            grep -m1 '^#define SUSFS_VERSION ' "$SRC/include/linux/susfs.h" || true
+            echo "===== SUSFS version declaration ====="
+            grep -n -m 5 'SUSFS_VERSION' \
+              "$SRC/include/linux/susfs.h" || true
           } | tee susfs-audit/source-revision.txt
 
-      - name: Fetch Linux 4.14 SUSFS patch for audit only
+      # ============================================================
+      # 3. Obtain the upstream Linux 4.14 patch for auditing.
+      #    This step never applies the patch.
+      # ============================================================
+      - name: Fetch upstream Linux 4.14 SUSFS patch
         shell: bash
         run: |
           set -euo pipefail
+
           PATCH_REPO="$RUNNER_TEMP/susfs4ksu-reference"
-          git clone --depth=1 --single-branch --branch master \
-            https://gitlab.com/simonpunk/susfs4ksu.git "$PATCH_REPO"
 
-          PATCH_FILE="$PATCH_REPO/kernel_patches/50_add_susfs_in_kernel-4.14.patch"
-          test -s "$PATCH_FILE"
+          git clone \
+            --depth=1 \
+            --single-branch \
+            --branch "${REFERENCE_BRANCH}" \
+            "${REFERENCE_REPO}" \
+            "$PATCH_REPO"
 
-          cp "$PATCH_FILE" susfs-audit/50_add_susfs_in_kernel-4.14.patch
-          git -C "$PATCH_REPO" rev-parse HEAD > susfs-audit/upstream-master-commit.txt
+          PATCH_FILE="${PATCH_REPO}/${PATCH_PATH}"
 
-          python3 - "$PATCH_FILE" <<'PY' > susfs-audit/patch-4.14-touched-files.txt
+          if [[ ! -s "$PATCH_FILE" ]]; then
+            echo "::error::Linux 4.14 SUSFS patch was not found."
+            echo "Expected path: ${PATCH_PATH}"
+            exit 1
+          fi
+
+          echo "Upstream repository commit:" \
+            > susfs-audit/upstream-reference.txt
+
+          git -C "$PATCH_REPO" rev-parse HEAD \
+            >> susfs-audit/upstream-reference.txt
+
+          {
+            echo
+            echo "Repository: ${REFERENCE_REPO}"
+            echo "Branch: ${REFERENCE_BRANCH}"
+            echo "Patch: ${PATCH_PATH}"
+            echo
+            echo "===== Version declarations found in patch ====="
+            grep -n -E 'SUSFS_VERSION|susfs_version' \
+              "$PATCH_FILE" || true
+          } >> susfs-audit/upstream-reference.txt
+
+          # Retain the exact reference patch in the downloadable
+          # workflow artifact, not as a committed kernel source file.
+          cp "$PATCH_FILE" \
+            susfs-audit/50_add_susfs_in_kernel-4.14.patch
+
+          # Generate a unique list of files touched by the patch.
+          python3 - "$PATCH_FILE" \
+            > susfs-audit/patch-4.14-touched-files.txt <<'PY'
           import sys
           from pathlib import Path
 
-          patch = Path(sys.argv[1]).read_text(errors="replace").splitlines()
+          patch_path = Path(sys.argv[1])
+          lines = patch_path.read_text(errors="replace").splitlines()
+
           paths = []
-          for line in patch:
-              if line.startswith("diff --git a/"):
-                  left = line.split(" b/", 1)[0][len("diff --git a/"):]
-                  if left and left not in paths:
-                      paths.append(left)
-          print("Files modified by upstream Linux 4.14 SUSFS patch:")
-          print("(Reference/audit list only; this workflow does not apply these hunks.)")
+          for line in lines:
+              if not line.startswith("diff --git a/"):
+                  continue
+
+              parts = line.split(" b/", 1)
+              if len(parts) != 2:
+                  continue
+
+              path = parts[0][len("diff --git a/"):]
+
+              if path and path not in paths:
+                  paths.append(path)
+
+          print("Linux 4.14 SUSFS upstream patch: touched files")
+          print("This is an audit list; no patch hunks were applied.")
           print()
+
           for path in paths:
               print(path)
           PY
 
-          {
-            echo "Upstream reference: https://gitlab.com/simonpunk/susfs4ksu/-/blob/master/kernel_patches/50_add_susfs_in_kernel-4.14.patch"
-            echo "Patch repository commit: $(cat susfs-audit/upstream-master-commit.txt)"
-            echo "Patch file: kernel_patches/50_add_susfs_in_kernel-4.14.patch"
-            echo
-            if grep -q 'Master repo will stay on version 1.3.8 forever' "$PATCH_REPO/README.md"; then
-              echo "WARNING: upstream master README says master is frozen at SUSFS 1.3.8."
-              echo "Xen-SuSFS source version must not be mixed blindly with this patch."
-            fi
-          } | tee susfs-audit/reference-warning.txt
+          echo "Patch reference fetched successfully."
+          echo "No patch has been applied."
 
-      - name: Import only SUSFS implementation source files
+      # ============================================================
+      # 4. Dry-run the patch against the current target branch.
+      #    A failure is recorded for analysis, not applied or hidden.
+      # ============================================================
+      - name: Check upstream patch applicability (dry run only)
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          PATCH_FILE="$GITHUB_WORKSPACE/susfs-audit/50_add_susfs_in_kernel-4.14.patch"
+
+          {
+            echo "Target branch: ${TARGET_BRANCH}"
+            echo "Target commit: $(git rev-parse HEAD)"
+            echo "Patch: ${PATCH_PATH}"
+            echo
+            echo "===== git apply --check output ====="
+          } > susfs-audit/patch-dry-run.txt
+
+          set +e
+          git apply --check --verbose "$PATCH_FILE" \
+            >> susfs-audit/patch-dry-run.txt 2>&1
+          PATCH_STATUS=$?
+          set -e
+
+          {
+            echo
+            echo "git apply --check exit code: ${PATCH_STATUS}"
+
+            if [[ "$PATCH_STATUS" -eq 0 ]]; then
+              echo "RESULT: Patch passes the dry-run check."
+              echo "NOTE: This does not guarantee a successful kernel build."
+            else
+              echo "RESULT: Patch does not apply cleanly to the current target."
+              echo "The output above must be reviewed before manual integration."
+            fi
+          } | tee -a susfs-audit/patch-dry-run.txt
+
+          # Deliberately do not apply the patch or fail this job just
+          # because the upstream patch conflicts with the target tree.
+
+      # ============================================================
+      # 5. Import only the three source files, after full preflight.
+      #    Existing different files are never overwritten.
+      # ============================================================
+      - name: Import SUSFS implementation source files
         shell: bash
         run: |
           set -euo pipefail
+
           SRC="$RUNNER_TEMP/Xen-SuSFS"
 
-          # These three files form the source-file set in Xen-SuSFS v2.x.
-          # Kernel call-site edits, Kconfig, Makefiles, defconfig and KSUN hooks
-          # are intentionally left untouched for the next integration stages.
           python3 - "$SRC" "$GITHUB_WORKSPACE" <<'PY'
           import shutil
           import sys
@@ -103,34 +229,43 @@ jobs:
 
           src_root = Path(sys.argv[1])
           dst_root = Path(sys.argv[2])
+
           files = (
               "fs/susfs.c",
               "include/linux/susfs.h",
               "include/linux/susfs_def.h",
           )
 
-          # Preflight all files first: never partially copy and never overwrite
-          # a target file that differs from the selected Xen-SuSFS source.
           problems = []
           to_copy = []
+
+          # Check every file before copying anything.
           for rel in files:
               src = src_root / rel
               dst = dst_root / rel
+
               if not src.is_file():
-                  problems.append(f"Source file missing: {rel}")
+                  problems.append(f"Missing source file: {rel}")
                   continue
+
               if dst.exists():
                   if not dst.is_file():
-                      problems.append(f"Target exists but is not a file: {rel}")
+                      problems.append(
+                          f"Target exists but is not a regular file: {rel}"
+                      )
                   elif src.read_bytes() != dst.read_bytes():
                       problems.append(
-                          f"Target differs from source; refusing to overwrite: {rel}"
+                          "Target differs from source; refusing to overwrite: "
+                          + rel
                       )
               else:
                   to_copy.append((src, dst, rel))
 
           if problems:
-              print("Preflight failed; no source files were copied:", file=sys.stderr)
+              print(
+                  "Preflight failed; no SUSFS source files were copied.",
+                  file=sys.stderr,
+              )
               for problem in problems:
                   print(f" - {problem}", file=sys.stderr)
               raise SystemExit(1)
@@ -139,22 +274,113 @@ jobs:
               dst.parent.mkdir(parents=True, exist_ok=True)
               shutil.copy2(src, dst)
               print(f"COPIED: {rel}")
+
           for rel in files:
+              src = src_root / rel
               dst = dst_root / rel
-              if dst.exists():
-                  print(f"VERIFIED: {rel}")
+
+              if not dst.is_file():
+                  raise SystemExit(f"Verification failed: {rel}")
+
+              if src.read_bytes() != dst.read_bytes():
+                  raise SystemExit(f"Content verification failed: {rel}")
+
+              print(f"VERIFIED: {rel}")
+
           if not to_copy:
-              print("All three SUSFS source files already exist and match Xen-SuSFS.")
+              print("All three files already exist and match Xen-SuSFS.")
           PY
 
-      - name: Audit source version and suspicious constants
+      # ============================================================
+      # 6. Record source version, file hashes and important constants.
+      # ============================================================
+      - name: Audit imported source files
         shell: bash
         run: |
           set -euo pipefail
-          SRC="$RUNNER_TEMP/Xen-SuSFS"
 
           {
-            echo "===== SUSFS source version ====="
-            grep -m1 '^#define SUSFS_VERSION ' include/linux/susfs.h || true
+            echo "===== Source version ====="
+            grep -n -m 5 'SUSFS_VERSION' \
+              include/linux/susfs.h || true
+
             echo
-            echo "===== Imported files and SHA-256 ====="
+            echo "===== SHA-256 checksums ====="
+            sha256sum \
+              fs/susfs.c \
+              include/linux/susfs.h \
+              include/linux/susfs_def.h
+
+            echo
+            echo "===== SUSFS-related declarations ====="
+            grep -n -E \
+              'KSTAT_SPOOF_CTIME_TV_SEC|SUSFS_VERSION|CONFIG_KSU_SUSFS' \
+              include/linux/susfs.h \
+              include/linux/susfs_def.h || true
+
+            echo
+            echo "===== Files intentionally not changed ====="
+            echo "fs/Makefile"
+            echo "Kconfig files"
+            echo "arch/arm64/configs/vayu_defconfig"
+            echo "KSUN manual hooks"
+            echo "build-kernel.yml"
+          } | tee susfs-audit/source-audit.txt
+
+      # ============================================================
+      # 7. Stage and commit ONLY the three imported source files.
+      # ============================================================
+      - name: Validate staged changes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git add -- \
+            fs/susfs.c \
+            include/linux/susfs.h \
+            include/linux/susfs_def.h
+
+          git diff --cached --check
+
+          {
+            echo "===== Staged change summary ====="
+            git diff --cached --stat
+
+            echo
+            echo "===== Staged paths ====="
+            git diff --cached --name-only
+          } | tee susfs-audit/staged-changes.txt
+
+      - name: Commit and push staged SUSFS sources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Never include audit reports or the upstream reference patch
+          # in the kernel commit.
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            echo "The three files already match Xen-SuSFS."
+            exit 0
+          fi
+
+          git commit -m "susfs: import initial source files"
+          git push origin "HEAD:${TARGET_BRANCH}"
+
+          echo "Source files pushed to ${TARGET_BRANCH}."
+
+      # ============================================================
+      # 8. Upload the patch and audit reports for inspection.
+      # ============================================================
+      - name: Upload SUSFS audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: susfs-linux-4.14-audit
+          path: susfs-audit/
+          if-no-files-found: warn
+          retention-days: 14
