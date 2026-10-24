@@ -89,6 +89,50 @@ jobs:
           } | tee susfs-audit/source-revision.txt
 
       # ============================================================
+      # Normalize source whitespace in the temporary clone only.
+      # This prevents git diff --check from rejecting harmless
+      # trailing spaces in the imported SUSFS source files.
+      # The Xen-SuSFS repository itself is never modified.
+      # ============================================================
+      - name: Normalize SUSFS source whitespace
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SRC="$RUNNER_TEMP/Xen-SuSFS"
+
+          python3 - "$SRC" <<'PY'
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          files = (
+              "fs/susfs.c",
+              "include/linux/susfs.h",
+              "include/linux/susfs_def.h",
+          )
+
+          for rel in files:
+              path = root / rel
+
+              if not path.is_file():
+                  raise SystemExit(f"Missing source file: {rel}")
+
+              text = path.read_text(encoding="utf-8")
+              lines = [line.rstrip() for line in text.splitlines()]
+
+              # Remove extra blank lines at EOF and preserve one final newline.
+              while lines and not lines[-1]:
+                  lines.pop()
+
+              path.write_text(
+                  "\n".join(lines) + "\n",
+                  encoding="utf-8",
+              )
+              print(f"NORMALIZED: {rel}")
+          PY
+
+      # ============================================================
       # 3. Obtain the upstream Linux 4.14 patch for auditing.
       #    This step never applies the patch.
       # ============================================================
