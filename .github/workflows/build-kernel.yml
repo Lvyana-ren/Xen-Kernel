@@ -33,8 +33,19 @@ jobs:
           ref: "16-KSUN_SuSFS"
           fetch-depth: 1
 
+      # 2. Verify embedded SUSFS kernel source
+      - name: Verify SUSFS kernel source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s fs/susfs.c
+          test -s include/linux/susfs.h
+          test -s include/linux/susfs_def.h
+          grep -q 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile
+          grep -q '#define KSTAT_SPOOF_CTIME_TV_SEC (1 << 8)' include/linux/susfs.h
+          git diff --check
 
-      # 2. Install KSUN first to fail fast
+      # 3. Install KSUN first to fail fast
       - name: Install KernelSU Next Legacy (pinned)
         shell: bash
         env:
@@ -54,6 +65,11 @@ jobs:
             exit 1
           fi
 
+          python3 scripts/apply-ksun-susfs-compat.py KernelSU-Next
+          git -C KernelSU-Next diff --check
+          grep -q 'config KSU_SUSFS' KernelSU-Next/kernel/Kconfig
+          grep -q 'SUSFS_MAGIC' KernelSU-Next/kernel/supercall/supercall.c
+
           ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
           grep -q kernelsu drivers/Makefile || \
             printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
@@ -67,7 +83,7 @@ jobs:
           echo "KSUN tag terdekat: $(git -C KernelSU-Next describe --tags --abbrev=0 || echo TIDAK-ADA)"
           git -C KernelSU-Next log --oneline -3
 
-      # 3. Backport path_umount for Linux 4.14
+      # 4. Backport path_umount for Linux 4.14
       - name: Backport path_umount
         shell: bash
         run: |
@@ -160,7 +176,7 @@ jobs:
 
           git diff --check
 
-      # 4. Apply existing Xen-Kernel manual hook patch
+      # 5. Apply existing Xen-Kernel manual hook patch
       - name: Apply KSUN manual hooks
         shell: bash
         run: |
@@ -179,92 +195,21 @@ jobs:
           git diff --check
 
       
-      # 4b. Check the current SUSFS integration state before patching
-      - name: Inspect SUSFS baseline
+      # 6. Validate integrated SUSFS v2.3.0 source
+      - name: Validate Xen SuSFS kernel integration
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "===== Existing SUSFS files ====="
-          for f in fs/susfs.c include/linux/susfs.h include/linux/susfs_def.h; do
-            if [ -f "$f" ]; then
-              echo "FOUND: $f"
-            else
-              echo "MISSING: $f"
-            fi
-          done
-
-          echo "===== Existing SUSFS symbols ====="
-          grep -R -n -E \
-            'SUSFS_VERSION|CONFIG_KSU_SUSFS|susfs_get_enabled_features' \
-            fs include/linux arch/arm64/configs/vayu_defconfig \
-            || true
-
-          echo "===== Existing source changes ====="
-          git status --short
+          grep -q 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' fs/Makefile
+          grep -q '#define SUSFS_VERSION "v2.3.0"' include/linux/susfs.h
+          grep -q '#define KSTAT_SPOOF_CTIME_TV_SEC (1 << 8)' include/linux/susfs.h
+          grep -q '^CONFIG_KSU=y$' arch/arm64/configs/vayu_defconfig
+          grep -q '^CONFIG_KSU_SUSFS=y$' arch/arm64/configs/vayu_defconfig
+          grep -q 'SUSFS_IS_INODE_OPEN_REDIRECT' fs/open.c
+          grep -q 'susfs_is_current_ksu_domain' fs/susfs.c
           git diff --check
 
-
-      - name: Generate SUSFS integration diff
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          REF_DIR="$RUNNER_TEMP/anymore-reference"
-
-          git clone \
-            --no-checkout \
-            https://github.com/AnymoreProject/android_kernel_vayu.git \
-            "$REF_DIR"
-
-          git -C "$REF_DIR" fetch --no-tags origin \
-            refs/heads/16:refs/remotes/origin/16 \
-            refs/heads/16-ksu:refs/remotes/origin/16-ksu
-
-          BASE="$(git -C "$REF_DIR" rev-parse refs/remotes/origin/16)"
-          SUSFS="$(git -C "$REF_DIR" rev-parse refs/remotes/origin/16-ksu)"
-
-          echo "Anymore base: $BASE"
-          echo "Anymore KSU:  $SUSFS"
-
-          mkdir -p susfs-audit
-
-          git -C "$REF_DIR" diff \
-            --stat "$BASE" "$SUSFS" \
-            > susfs-audit/diff-stat.txt
-
-          git -C "$REF_DIR" diff \
-            --name-status "$BASE" "$SUSFS" \
-            > susfs-audit/changed-files.txt
-
-          git -C "$REF_DIR" diff \
-            --no-ext-diff "$BASE" "$SUSFS" \
-            -- fs include/linux include/uapi \
-               drivers/Kconfig drivers/Makefile \
-               arch/arm64/configs \
-            > susfs-audit/kernel-integration.diff
-
-          echo "===== Changed files ====="
-          cat susfs-audit/changed-files.txt
-
-          echo "===== Diff summary ====="
-          cat susfs-audit/diff-stat.txt
-
-          echo "===== SUSFS-related files ====="
-          grep -iE 'susfs|sus_' \
-            susfs-audit/changed-files.txt || true
-
-      - name: Upload SUSFS audit report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Xen-SUSFS-Audit
-          path: susfs-audit/
-          if-no-files-found: warn
-          retention-days: 7
-
-
-      # 5. Install build dependencies
+      # 7. Install build dependencies
       - name: Install build dependencies
         shell: bash
         run: |
@@ -289,7 +234,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-xen-ksun-ccache-
 
-      # 7. Restore the exact baseline toolchain source
+      # 9. Restore the exact baseline toolchain source
       - name: Restore baseline Clang cache
         uses: actions/cache@v4
         with:
@@ -326,7 +271,7 @@ jobs:
           echo "===== Clang target ====="
           "$HOME/clang/bin/clang" -dumpmachine
 
-      # 8. Validate source
+      # 10. Validate source
       - name: Validate source and toolchains
         shell: bash
         run: |
@@ -357,7 +302,7 @@ jobs:
           ld.lld --version
 
 
-      # 8b. Buang tag -openela dari versi kernel
+      # 10b. Buang tag -openela dari versi kernel
       - name: Strip -openela from kernel version
         shell: bash
         run: |
@@ -378,7 +323,7 @@ jobs:
 
           make kernelversion
 
-      # 9. Generate configuration
+      # 11. Generate configuration
       - name: Configure KSUN manual hook without KPROBES
         shell: bash
         run: |
@@ -422,6 +367,18 @@ jobs:
             --enable KSU_MANUAL_HOOK \
             --disable KSU_KPROBES_HOOK \
             --disable KSU_SYSCALL_TABLE_HOOK \
+            --enable KSU_SUSFS \
+            --enable KSU_SUSFS_SUS_PATH \
+            --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT \
+            --enable KSU_SUSFS_TRY_UMOUNT \
+            --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG \
+            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT \
+            --enable KSU_SUSFS_SUS_MAP \
+            --disable KSU_SUSFS_SUS_MEMFD \
             --enable LTO_CLANG \
             --enable LTO \
             --enable THINLTO \
@@ -473,6 +430,8 @@ jobs:
             exit 1
           fi
 
+          if ! grep -q '^CONFIG_KSU_SUSFS=y
+
           if grep -q '^CONFIG_KPROBES=y' out/.config; then
             echo "::error::KPROBES was re-enabled by Kconfig."
             exit 1
@@ -512,7 +471,7 @@ jobs:
           "${KMAKE[@]}" kernelrelease
 
 
-      # 10. Compile using baseline compiler arguments
+      # 12. Compile using baseline compiler arguments
       - name: Compile Xen-Kernel Image
         shell: bash
         run: |
@@ -637,7 +596,190 @@ jobs:
           echo "===== Artifacts ====="
           find artifacts -type f -exec ls -lh '{}' \;
 
-      # 12. Upload artifacts even on failure
+      # 14. Upload artifacts even on failure
+      - name: Upload Xen-Kernel artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KSUN
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7 out/.config; then
+            echo "::error::CONFIG_KSU_SUSFS is not enabled after olddefconfig."
+            exit 1
+          fi
+          for symbol in KSU_SUSFS_SUS_PATH KSU_SUSFS_SUS_MOUNT KSU_SUSFS_SUS_KSTAT KSU_SUSFS_TRY_UMOUNT KSU_SUSFS_SPOOF_UNAME KSU_SUSFS_ENABLE_LOG KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG KSU_SUSFS_OPEN_REDIRECT KSU_SUSFS_SUS_MAP; do
+            grep -q "^CONFIG_${symbol}=y$" out/.config || {
+              echo "::error::CONFIG_${symbol} is not enabled after olddefconfig."
+              exit 1
+            }
+          done
+
+          if grep -q '^CONFIG_KPROBES=y' out/.config; then
+            echo "::error::KPROBES was re-enabled by Kconfig."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_KRETPROBES=y' out/.config; then
+            echo "::error::KRETPROBES was re-enabled by Kconfig."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_KSU_KPROBES_HOOK=y' out/.config; then
+            echo "::error::KSUN KPROBES hook is enabled."
+            exit 1
+          fi
+
+          
+
+          echo "===== Validate compiler optimization config ====="
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config; then
+            echo "::error::CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE is not enabled."
+            exit 1
+          fi
+
+          if grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$' out/.config; then
+            echo "::error::CONFIG_CC_OPTIMIZE_FOR_SIZE is enabled."
+            exit 1
+          fi
+
+          echo "PASS: Performance optimization selected; size optimization disabled."
+
+          grep -E \
+            '^CONFIG_CC_OPTIMIZE_FOR_(PERFORMANCE|SIZE)=y$|^# CONFIG_CC_OPTIMIZE_FOR_(PERFORMANCE|SIZE) is not set$' \
+            out/.config || true
+
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+
+      # 12. Compile using baseline compiler arguments
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$HOME/clang/bin:$PATH"
+          export KBUILD_BUILD_USER="Lvyana"
+          export KBUILD_BUILD_HOST="Xen-Kernel"
+
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          ccache -s || true
+
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== 25 baris error pertama dari build.log ====="
+            grep -n -m 25 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            echo "::error::Kernel compilation failed."
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+
+          echo "===== Kernel release ====="
+          # Baca file hasil build; jangan panggil make lagi tanpa variabel toolchain
+          # (make akan mengevaluasi ulang Makefile/config dengan gcc bawaan).
+          cat out/include/config/kernel.release
+
+          # Bukti LTO dari HASIL build (bukan dari .config yang bisa berubah setelahnya)
+          echo "===== Cek LTO di hasil build ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|THINLTO|LTO_CLANG|LTO_NONE)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "(config tertanam di Image tidak terbaca)"
+          fi
+          echo "simbol .llvm. di System.map: $(grep -c '\.llvm\.' out/System.map || true)  (>0 = ThinLTO)"
+
+      # 11. Collect artifacts even when compilation fails
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          mkdir -p artifacts
+
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f baseline-ksun.config ]] || cp baseline-ksun.config artifacts/
+
+          if [[ -f out/.config ]]; then
+            cp out/.config artifacts/kernel.config
+          fi
+
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+
+          git rev-parse HEAD \
+            > artifacts/source-commit.txt 2>/dev/null || true
+
+          if [[ -d KernelSU-Next/.git ]]; then
+            git -C KernelSU-Next rev-parse HEAD \
+              > artifacts/ksun-commit.txt 2>/dev/null || true
+          fi
+
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+
+          echo "===== Artifacts ====="
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      # 14. Upload artifacts even on failure
       - name: Upload Xen-Kernel artifacts
         if: always()
         uses: actions/upload-artifact@v4
