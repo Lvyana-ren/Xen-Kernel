@@ -16,6 +16,7 @@
 #include <linux/types.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
+#include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/dcache.h>
@@ -45,8 +46,6 @@
 #endif
 
 #ifdef CONFIG_KSU_SUSFS
-extern u32 susfs_ksu_sid;
-extern u32 susfs_priv_app_sid;
 bool susfs_is_avc_log_spoofing_enabled = false;
 #endif
 
@@ -194,11 +193,16 @@ static void avc_dump_query(struct audit_buffer *ab, struct selinux_state *state,
 
 	rc = security_sid_to_context(state, tsid, &scontext, &scontext_len);
 #ifdef CONFIG_KSU_SUSFS
-	if (unlikely(tsid == susfs_ksu_sid && susfs_is_avc_log_spoofing_enabled)) {
-		if (rc)
-			audit_log_format(ab, " tsid=%d", susfs_priv_app_sid);
-		else
-			audit_log_format(ab, " tcontext=%s", "u:r:priv_app:s0:c512,c768");
+	/*
+	 * Resolve the target context directly instead of relying on SUSFS SID
+	 * globals that are not defined by this kernel/KSUN combination.
+	 * The spoof path is only valid when SELinux resolved the context.
+	 */
+	if (unlikely(!rc && susfs_is_avc_log_spoofing_enabled &&
+		     !strcmp(scontext, "u:r:ksu:s0"))) {
+		audit_log_format(ab, " tcontext=%s",
+				 "u:r:priv_app:s0:c512,c768");
+		kfree(scontext);
 		goto bypass_orig_flow;
 	}
 #endif
