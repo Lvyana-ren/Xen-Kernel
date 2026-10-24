@@ -66,6 +66,32 @@ jobs:
           "$HOME/clang/bin/clang" --version
           "$HOME/clang/bin/ld.lld" --version
 
+      - name: Strip -openela from kernel version (runner-only)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== EXTRAVERSION before ====="
+          grep -n '^EXTRAVERSION' Makefile
+
+          # Match the established process in 16-KSUN_Manual_hook.
+          # This edits only the temporary GitHub Actions checkout, not the repository commit.
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "===== EXTRAVERSION after ====="
+          grep -n '^EXTRAVERSION' Makefile
+
+          KERNEL_VERSION="$(make kernelversion)"
+          echo "Kernel version after stripping vendor suffix: $KERNEL_VERSION"
+          if printf '%s' "$KERNEL_VERSION" | grep -qi 'openela'; then
+            echo "::error::-openela is still present in kernelversion."
+            exit 1
+          fi
+          test "$KERNEL_VERSION" = "4.14.357" || {
+            echo "::error::Unexpected base kernel version: $KERNEL_VERSION"
+            exit 1
+          }
+
       - name: Verify embedded SuSFS v2.3.0 integration
         shell: bash
         run: |
@@ -157,7 +183,7 @@ jobs:
           "${KMAKE[@]}" vayu_defconfig
 
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen-KSUN-SuSFS" \
+            --set-str LOCALVERSION "-Xen-KSUN+2" \
             --disable LOCALVERSION_AUTO \
             --enable MODULES \
             --disable KPROBES \
@@ -215,7 +241,14 @@ jobs:
 
           cp out/.config baseline-ksun-susfs.config
           grep -E '^(CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|LTO|LTO_CLANG|THINLTO|CC_OPTIMIZE_FOR_PERFORMANCE)=|# CONFIG_(KPROBES|KRETPROBES|LTO_NONE|CC_OPTIMIZE_FOR_SIZE) is not set)' out/.config
-          "${KMAKE[@]}" kernelrelease
+
+          KERNEL_RELEASE="$("${KMAKE[@]}" kernelrelease)"
+          echo "Expected kernel release: 4.14.357-Xen-KSUN+2"
+          echo "Actual kernel release:   $KERNEL_RELEASE"
+          test "$KERNEL_RELEASE" = "4.14.357-Xen-KSUN+2" || {
+            echo "::error::Kernel release does not match 4.14.357-Xen-KSUN+2"
+            exit 1
+          }
 
       - name: Build kernel Image
         shell: bash
