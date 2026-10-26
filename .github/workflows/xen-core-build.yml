@@ -43,8 +43,9 @@ jobs:
             "$HOME/clang"
           rm -rf "$HOME/clang/.git"
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
-          clang --version
-          ld.lld --version
+          # GITHUB_PATH applies to later steps only; use explicit paths in this shell.
+          "$HOME/clang/bin/clang" --version
+          "$HOME/clang/bin/ld.lld" --version
 
       - name: Verify Xen Core procfs integration
         shell: bash
