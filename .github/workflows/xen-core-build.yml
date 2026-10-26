@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - 16-KSUN_SuSFS
+      - KSUN-Core
 
 permissions:
   contents: read
@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Xen-Kernel
         uses: actions/checkout@v4
         with:
-          ref: 16-KSUN_SuSFS
+          ref: KSUN-Core
           fetch-depth: 1
 
       - name: Install build dependencies
