@@ -105,6 +105,10 @@ jobs:
           grep -q '^CONFIG_KSU=y$' arch/arm64/configs/vayu_defconfig
           grep -q '^CONFIG_KSU_SUSFS=y$' arch/arm64/configs/vayu_defconfig
           grep -q 'SUSFS_IS_INODE_OPEN_REDIRECT' fs/open.c
+          test -s fs/proc/xen_core.c
+          grep -q 'proc-y.*xen_core.o' fs/proc/Makefile
+          grep -q 'proc_create("xen_core", 0444' fs/proc/xen_core.c
+          grep -q 'CORE_KEY' fs/proc/xen_core.c
           grep -q 'susfs_is_current_ksu_domain' fs/susfs.c
           grep -Fq 'int path_umount(struct path *path, int flags)' fs/namespace.c
           git diff --check
