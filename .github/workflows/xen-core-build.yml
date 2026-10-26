@@ -1,0 +1,88 @@
+name: Xen Core Interface - Build Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - KSUN-Core
+    paths:
+      - "fs/proc/xen_core.c"
+      - "fs/proc/Makefile"
+      - "Documentation/xen-core/**"
+      - ".github/workflows/xen-core-build.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout KSUN-Core
+        uses: actions/checkout@v4
+        with:
+          ref: KSUN-Core
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison build-essential flex git libelf-dev libssl-dev make \
+            python3 rsync device-tree-compiler gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi libncurses-dev lz4 zip xz-utils file
+
+      - name: Prepare Clang 20 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --single-branch --branch 15.0 \
+            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
+            "$HOME/clang"
+          rm -rf "$HOME/clang/.git"
+          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+          clang --version
+          ld.lld --version
+
+      - name: Verify Xen Core procfs integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s fs/proc/xen_core.c
+          grep -q 'proc-y.*xen_core.o' fs/proc/Makefile
+          grep -q 'proc_create("xen_core", 0444' fs/proc/xen_core.c
+          grep -q 'CORE_KEY=X' Documentation/xen-core/README.md
+          git diff --check
+
+      - name: Configure vayu kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ARCH=arm64
+          make O=out vayu_defconfig
+          scripts/config --file out/.config --set-str LOCALVERSION "-Xen-Core"
+          scripts/config --file out/.config --disable LOCALVERSION_AUTO
+          make O=out olddefconfig
+
+      - name: Build ARM64 kernel
+        shell: bash
+        run: |
+          set -euo pipefail
+          make ARCH=arm64 O=out \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 \
+            -j"$(nproc)" Image.gz-dtb
+
+      - name: Upload kernel build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xen-core-vayu-kernel
+          path: |
+            out/arch/arm64/boot/Image.gz-dtb
+            out/arch/arm64/boot/Image
+          if-no-files-found: error
