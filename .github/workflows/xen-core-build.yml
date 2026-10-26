@@ -108,11 +108,1065 @@ jobs:
           test -s fs/proc/xen_core.c
           grep -q 'proc-y.*xen_core.o' fs/proc/Makefile
           grep -q 'proc_create("xen_core", 0444' fs/proc/xen_core.c
-          grep -q 'CORE_KEY=X3691QTZ' fs/proc/xen_core.c
-          grep -q 'FAMILY=Xen-Kernel' fs/proc/xen_core.c
-          grep -q 'VERSION=KSUN+2' fs/proc/xen_core.c
-          grep -q 'DEVICE=vayu' fs/proc/xen_core.c
-          grep -q 'FEATURE_LEVEL=L1' fs/proc/xen_core.c
+          # xen_core.c emits manifest values through macros, so validate the
+          # macro definitions rather than searching for expanded output strings.
+          grep -Eq '^#define XEN_CORE_KEY[[:space:]]+"X3691QTZ"
+          grep -q 'CORE_KEY=X3691QTZ' Documentation/xen-core/README.md
+          grep -q 'FAMILY=Xen-Kernel' Documentation/xen-core/README.md
+          grep -q 'susfs_is_current_ksu_domain' fs/susfs.c
+          grep -Fq 'int path_umount(struct path *path, int flags)' fs/namespace.c
+          git diff --check
+
+      - name: Install pinned KernelSU-Next and apply SuSFS compatibility bridge
+        shell: bash
+        env:
+          KSUN_REPO: https://github.com/Lvyana-ren/KernelSU-Next
+          KSUN_SHA: 465490a26667ba4cf00b3be975a7e28e53978829
+        run: |
+          set -euo pipefail
+          test ! -e KernelSU-Next
+          git clone "$KSUN_REPO" KernelSU-Next
+          git -C KernelSU-Next checkout --detach "$KSUN_SHA"
+          ACTUAL="$(git -C KernelSU-Next rev-parse HEAD)"
+          test "$ACTUAL" = "$KSUN_SHA" || {
+            echo "::error::KSUN SHA mismatch: $ACTUAL"
+            exit 1
+          }
+
+          python3 scripts/apply-ksun-susfs-compat.py KernelSU-Next
+          git -C KernelSU-Next diff --check
+          grep -q 'config KSU_SUSFS' KernelSU-Next/kernel/Kconfig
+          grep -q 'SUSFS_MAGIC' KernelSU-Next/kernel/supercall/supercall.c
+          grep -q 'XEN-SUSFS-KSUN-COMPAT: setuid runtime' KernelSU-Next/kernel/hook/setuid_hook.c
+
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          grep -q 'KSU_MANUAL_HOOK' KernelSU-Next/kernel/Kconfig
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
+          echo "KSUN commit: $ACTUAL"
+          git -C KernelSU-Next log -1 --oneline
+
+      - name: Backport path_umount only if absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q 'int path_umount(struct path \*path, int flags)' fs/namespace.c; then
+            echo "path_umount already present; no backport needed."
+          else
+            echo "::error::path_umount missing; apply a reviewed Linux 4.14 backport before building."
+            exit 1
+          fi
+
+      - name: Apply Xen-Kernel KSUN manual hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-ksun-manual-hooks.py
+          grep -q 'ksu_handle_execveat' fs/exec.c
+          grep -q 'ksu_handle_faccessat' fs/open.c
+          grep -Eq 'ksu_handle_sys_read|ksu_vfs_read_hook' fs/read_write.c
+          grep -q 'ksu_handle_stat' fs/stat.c
+          grep -q 'ksu_handle_sys_reboot' kernel/reboot.c
+          git diff --check
+
+      - name: Configure manual hook, SuSFS, Xen Core and ThinLTO
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          LLVM_VARS=(
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1 LLVM_IAS=1
+          )
+          KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
+          "${KMAKE[@]}" vayu_defconfig
+
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Xen-KSUN+2" \
+            --disable LOCALVERSION_AUTO \
+            --enable MODULES \
+            --disable KPROBES \
+            --disable KRETPROBES \
+            --enable KSU \
+            --enable KSU_MANUAL_HOOK \
+            --disable KSU_KPROBES_HOOK \
+            --disable KSU_SYSCALL_TABLE_HOOK \
+            --enable KSU_SUSFS \
+            --enable KSU_SUSFS_SUS_PATH \
+            --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT \
+            --enable KSU_SUSFS_TRY_UMOUNT \
+            --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG \
+            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT \
+            --enable KSU_SUSFS_SUS_MAP \
+            --disable KSU_SUSFS_SUS_MEMFD \
+            --enable LTO_CLANG \
+            --enable LTO \
+            --enable THINLTO \
+            --disable LTO_NONE \
+            --enable CC_OPTIMIZE_FOR_PERFORMANCE \
+            --disable CC_OPTIMIZE_FOR_SIZE
+
+          "${KMAKE[@]}" olddefconfig
+
+          required=(
+            CONFIG_MODULES CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KSU_SUSFS
+            CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT
+            CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_TRY_UMOUNT
+            CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_ENABLE_LOG
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP
+            CONFIG_LTO CONFIG_LTO_CLANG CONFIG_THINLTO
+            CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+          )
+          for symbol in "${required[@]}"; do
+            grep -q "^$symbol=y$" out/.config || {
+              echo "::error::$symbol is not enabled after olddefconfig"
+              exit 1
+            }
+          done
+
+          for symbol in CONFIG_KPROBES CONFIG_KRETPROBES CONFIG_KSU_KPROBES_HOOK \
+                        CONFIG_KSU_SYSCALL_TABLE_HOOK CONFIG_LTO_NONE CONFIG_CC_OPTIMIZE_FOR_SIZE; do
+            if grep -q "^$symbol=y$" out/.config; then
+              echo "::error::$symbol must remain disabled"
+              exit 1
+            fi
+          done
+
+          # Xen Core is built into fs/proc; verify the object is part of the kernel build.
+          grep -q 'proc-y.*xen_core.o' fs/proc/Makefile
+          test -s fs/proc/xen_core.c
+          cp out/.config baseline-ksun-susfs.config
+          grep -E '^(CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|LTO|LTO_CLANG|THINLTO|CC_OPTIMIZE_FOR_PERFORMANCE)=|# CONFIG_(KPROBES|KRETPROBES|LTO_NONE|CC_OPTIMIZE_FOR_SIZE) is not set)' out/.config
+
+          KERNEL_RELEASE="$("${KMAKE[@]}" --no-print-directory -s kernelrelease 2>/dev/null)"
+          echo "Expected kernel release: 4.14.357-Xen-KSUN+2"
+          echo "Actual kernel release:   $KERNEL_RELEASE"
+          test "$KERNEL_RELEASE" = "4.14.357-Xen-KSUN+2" || {
+            echo "::error::Kernel release does not match 4.14.357-Xen-KSUN+2"
+            exit 1
+          }
+
+      - name: Build kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          export KBUILD_BUILD_USER=Lvyana
+          export KBUILD_BUILD_HOST=Xen-Kernel
+          set +e
+          make -j"$(nproc)" O=out ARCH=arm64 SUBARCH=arm64 DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld \
+            LLVM=1 LLVM_IAS=1 CC="ccache clang" Image 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$status" -ne 0 ]; then
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            echo "::error::Kernel compilation failed"
+            exit "$status"
+          fi
+          test -s out/arch/arm64/boot/Image
+          file out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+          cat out/include/config/kernel.release
+          echo "ThinLTO .llvm. symbol count: $(grep -c '\.llvm\.' out/System.map || true)"
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f baseline-ksun-susfs.config ]] || cp baseline-ksun-susfs.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ ! -s out/arch/arm64/boot/Image ]] || cp out/arch/arm64/boot/Image artifacts/
+          [[ ! -f out/include/config/kernel.release ]] || cp out/include/config/kernel.release artifacts/kernel-release.txt
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          if [[ -d KernelSU-Next/.git ]]; then
+            git -C KernelSU-Next rev-parse HEAD > artifacts/ksun-commit.txt 2>/dev/null || true
+            git -C KernelSU-Next diff --stat > artifacts/ksun-compat-diffstat.txt 2>/dev/null || true
+          fi
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel SuSFS + Xen Core artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KSUN-SuSFS-Xen-Core
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ fs/proc/xen_core.c
+          grep -Eq '^#define XEN_CORE_FAMILY[[:space:]]+"Xen-Kernel"
+          grep -q 'CORE_KEY=X3691QTZ' Documentation/xen-core/README.md
+          grep -q 'FAMILY=Xen-Kernel' Documentation/xen-core/README.md
+          grep -q 'susfs_is_current_ksu_domain' fs/susfs.c
+          grep -Fq 'int path_umount(struct path *path, int flags)' fs/namespace.c
+          git diff --check
+
+      - name: Install pinned KernelSU-Next and apply SuSFS compatibility bridge
+        shell: bash
+        env:
+          KSUN_REPO: https://github.com/Lvyana-ren/KernelSU-Next
+          KSUN_SHA: 465490a26667ba4cf00b3be975a7e28e53978829
+        run: |
+          set -euo pipefail
+          test ! -e KernelSU-Next
+          git clone "$KSUN_REPO" KernelSU-Next
+          git -C KernelSU-Next checkout --detach "$KSUN_SHA"
+          ACTUAL="$(git -C KernelSU-Next rev-parse HEAD)"
+          test "$ACTUAL" = "$KSUN_SHA" || {
+            echo "::error::KSUN SHA mismatch: $ACTUAL"
+            exit 1
+          }
+
+          python3 scripts/apply-ksun-susfs-compat.py KernelSU-Next
+          git -C KernelSU-Next diff --check
+          grep -q 'config KSU_SUSFS' KernelSU-Next/kernel/Kconfig
+          grep -q 'SUSFS_MAGIC' KernelSU-Next/kernel/supercall/supercall.c
+          grep -q 'XEN-SUSFS-KSUN-COMPAT: setuid runtime' KernelSU-Next/kernel/hook/setuid_hook.c
+
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          grep -q 'KSU_MANUAL_HOOK' KernelSU-Next/kernel/Kconfig
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
+          echo "KSUN commit: $ACTUAL"
+          git -C KernelSU-Next log -1 --oneline
+
+      - name: Backport path_umount only if absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q 'int path_umount(struct path \*path, int flags)' fs/namespace.c; then
+            echo "path_umount already present; no backport needed."
+          else
+            echo "::error::path_umount missing; apply a reviewed Linux 4.14 backport before building."
+            exit 1
+          fi
+
+      - name: Apply Xen-Kernel KSUN manual hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-ksun-manual-hooks.py
+          grep -q 'ksu_handle_execveat' fs/exec.c
+          grep -q 'ksu_handle_faccessat' fs/open.c
+          grep -Eq 'ksu_handle_sys_read|ksu_vfs_read_hook' fs/read_write.c
+          grep -q 'ksu_handle_stat' fs/stat.c
+          grep -q 'ksu_handle_sys_reboot' kernel/reboot.c
+          git diff --check
+
+      - name: Configure manual hook, SuSFS, Xen Core and ThinLTO
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          LLVM_VARS=(
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1 LLVM_IAS=1
+          )
+          KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
+          "${KMAKE[@]}" vayu_defconfig
+
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Xen-KSUN+2" \
+            --disable LOCALVERSION_AUTO \
+            --enable MODULES \
+            --disable KPROBES \
+            --disable KRETPROBES \
+            --enable KSU \
+            --enable KSU_MANUAL_HOOK \
+            --disable KSU_KPROBES_HOOK \
+            --disable KSU_SYSCALL_TABLE_HOOK \
+            --enable KSU_SUSFS \
+            --enable KSU_SUSFS_SUS_PATH \
+            --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT \
+            --enable KSU_SUSFS_TRY_UMOUNT \
+            --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG \
+            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT \
+            --enable KSU_SUSFS_SUS_MAP \
+            --disable KSU_SUSFS_SUS_MEMFD \
+            --enable LTO_CLANG \
+            --enable LTO \
+            --enable THINLTO \
+            --disable LTO_NONE \
+            --enable CC_OPTIMIZE_FOR_PERFORMANCE \
+            --disable CC_OPTIMIZE_FOR_SIZE
+
+          "${KMAKE[@]}" olddefconfig
+
+          required=(
+            CONFIG_MODULES CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KSU_SUSFS
+            CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT
+            CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_TRY_UMOUNT
+            CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_ENABLE_LOG
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP
+            CONFIG_LTO CONFIG_LTO_CLANG CONFIG_THINLTO
+            CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+          )
+          for symbol in "${required[@]}"; do
+            grep -q "^$symbol=y$" out/.config || {
+              echo "::error::$symbol is not enabled after olddefconfig"
+              exit 1
+            }
+          done
+
+          for symbol in CONFIG_KPROBES CONFIG_KRETPROBES CONFIG_KSU_KPROBES_HOOK \
+                        CONFIG_KSU_SYSCALL_TABLE_HOOK CONFIG_LTO_NONE CONFIG_CC_OPTIMIZE_FOR_SIZE; do
+            if grep -q "^$symbol=y$" out/.config; then
+              echo "::error::$symbol must remain disabled"
+              exit 1
+            fi
+          done
+
+          # Xen Core is built into fs/proc; verify the object is part of the kernel build.
+          grep -q 'proc-y.*xen_core.o' fs/proc/Makefile
+          test -s fs/proc/xen_core.c
+          cp out/.config baseline-ksun-susfs.config
+          grep -E '^(CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|LTO|LTO_CLANG|THINLTO|CC_OPTIMIZE_FOR_PERFORMANCE)=|# CONFIG_(KPROBES|KRETPROBES|LTO_NONE|CC_OPTIMIZE_FOR_SIZE) is not set)' out/.config
+
+          KERNEL_RELEASE="$("${KMAKE[@]}" --no-print-directory -s kernelrelease 2>/dev/null)"
+          echo "Expected kernel release: 4.14.357-Xen-KSUN+2"
+          echo "Actual kernel release:   $KERNEL_RELEASE"
+          test "$KERNEL_RELEASE" = "4.14.357-Xen-KSUN+2" || {
+            echo "::error::Kernel release does not match 4.14.357-Xen-KSUN+2"
+            exit 1
+          }
+
+      - name: Build kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          export KBUILD_BUILD_USER=Lvyana
+          export KBUILD_BUILD_HOST=Xen-Kernel
+          set +e
+          make -j"$(nproc)" O=out ARCH=arm64 SUBARCH=arm64 DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld \
+            LLVM=1 LLVM_IAS=1 CC="ccache clang" Image 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$status" -ne 0 ]; then
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            echo "::error::Kernel compilation failed"
+            exit "$status"
+          fi
+          test -s out/arch/arm64/boot/Image
+          file out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+          cat out/include/config/kernel.release
+          echo "ThinLTO .llvm. symbol count: $(grep -c '\.llvm\.' out/System.map || true)"
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f baseline-ksun-susfs.config ]] || cp baseline-ksun-susfs.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ ! -s out/arch/arm64/boot/Image ]] || cp out/arch/arm64/boot/Image artifacts/
+          [[ ! -f out/include/config/kernel.release ]] || cp out/include/config/kernel.release artifacts/kernel-release.txt
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          if [[ -d KernelSU-Next/.git ]]; then
+            git -C KernelSU-Next rev-parse HEAD > artifacts/ksun-commit.txt 2>/dev/null || true
+            git -C KernelSU-Next diff --stat > artifacts/ksun-compat-diffstat.txt 2>/dev/null || true
+          fi
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel SuSFS + Xen Core artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KSUN-SuSFS-Xen-Core
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ fs/proc/xen_core.c
+          grep -Eq '^#define XEN_CORE_VERSION[[:space:]]+"KSUN\+4"
+          grep -q 'CORE_KEY=X3691QTZ' Documentation/xen-core/README.md
+          grep -q 'FAMILY=Xen-Kernel' Documentation/xen-core/README.md
+          grep -q 'susfs_is_current_ksu_domain' fs/susfs.c
+          grep -Fq 'int path_umount(struct path *path, int flags)' fs/namespace.c
+          git diff --check
+
+      - name: Install pinned KernelSU-Next and apply SuSFS compatibility bridge
+        shell: bash
+        env:
+          KSUN_REPO: https://github.com/Lvyana-ren/KernelSU-Next
+          KSUN_SHA: 465490a26667ba4cf00b3be975a7e28e53978829
+        run: |
+          set -euo pipefail
+          test ! -e KernelSU-Next
+          git clone "$KSUN_REPO" KernelSU-Next
+          git -C KernelSU-Next checkout --detach "$KSUN_SHA"
+          ACTUAL="$(git -C KernelSU-Next rev-parse HEAD)"
+          test "$ACTUAL" = "$KSUN_SHA" || {
+            echo "::error::KSUN SHA mismatch: $ACTUAL"
+            exit 1
+          }
+
+          python3 scripts/apply-ksun-susfs-compat.py KernelSU-Next
+          git -C KernelSU-Next diff --check
+          grep -q 'config KSU_SUSFS' KernelSU-Next/kernel/Kconfig
+          grep -q 'SUSFS_MAGIC' KernelSU-Next/kernel/supercall/supercall.c
+          grep -q 'XEN-SUSFS-KSUN-COMPAT: setuid runtime' KernelSU-Next/kernel/hook/setuid_hook.c
+
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          grep -q 'KSU_MANUAL_HOOK' KernelSU-Next/kernel/Kconfig
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
+          echo "KSUN commit: $ACTUAL"
+          git -C KernelSU-Next log -1 --oneline
+
+      - name: Backport path_umount only if absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q 'int path_umount(struct path \*path, int flags)' fs/namespace.c; then
+            echo "path_umount already present; no backport needed."
+          else
+            echo "::error::path_umount missing; apply a reviewed Linux 4.14 backport before building."
+            exit 1
+          fi
+
+      - name: Apply Xen-Kernel KSUN manual hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-ksun-manual-hooks.py
+          grep -q 'ksu_handle_execveat' fs/exec.c
+          grep -q 'ksu_handle_faccessat' fs/open.c
+          grep -Eq 'ksu_handle_sys_read|ksu_vfs_read_hook' fs/read_write.c
+          grep -q 'ksu_handle_stat' fs/stat.c
+          grep -q 'ksu_handle_sys_reboot' kernel/reboot.c
+          git diff --check
+
+      - name: Configure manual hook, SuSFS, Xen Core and ThinLTO
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          LLVM_VARS=(
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1 LLVM_IAS=1
+          )
+          KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
+          "${KMAKE[@]}" vayu_defconfig
+
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Xen-KSUN+2" \
+            --disable LOCALVERSION_AUTO \
+            --enable MODULES \
+            --disable KPROBES \
+            --disable KRETPROBES \
+            --enable KSU \
+            --enable KSU_MANUAL_HOOK \
+            --disable KSU_KPROBES_HOOK \
+            --disable KSU_SYSCALL_TABLE_HOOK \
+            --enable KSU_SUSFS \
+            --enable KSU_SUSFS_SUS_PATH \
+            --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT \
+            --enable KSU_SUSFS_TRY_UMOUNT \
+            --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG \
+            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT \
+            --enable KSU_SUSFS_SUS_MAP \
+            --disable KSU_SUSFS_SUS_MEMFD \
+            --enable LTO_CLANG \
+            --enable LTO \
+            --enable THINLTO \
+            --disable LTO_NONE \
+            --enable CC_OPTIMIZE_FOR_PERFORMANCE \
+            --disable CC_OPTIMIZE_FOR_SIZE
+
+          "${KMAKE[@]}" olddefconfig
+
+          required=(
+            CONFIG_MODULES CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KSU_SUSFS
+            CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT
+            CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_TRY_UMOUNT
+            CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_ENABLE_LOG
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP
+            CONFIG_LTO CONFIG_LTO_CLANG CONFIG_THINLTO
+            CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+          )
+          for symbol in "${required[@]}"; do
+            grep -q "^$symbol=y$" out/.config || {
+              echo "::error::$symbol is not enabled after olddefconfig"
+              exit 1
+            }
+          done
+
+          for symbol in CONFIG_KPROBES CONFIG_KRETPROBES CONFIG_KSU_KPROBES_HOOK \
+                        CONFIG_KSU_SYSCALL_TABLE_HOOK CONFIG_LTO_NONE CONFIG_CC_OPTIMIZE_FOR_SIZE; do
+            if grep -q "^$symbol=y$" out/.config; then
+              echo "::error::$symbol must remain disabled"
+              exit 1
+            fi
+          done
+
+          # Xen Core is built into fs/proc; verify the object is part of the kernel build.
+          grep -q 'proc-y.*xen_core.o' fs/proc/Makefile
+          test -s fs/proc/xen_core.c
+          cp out/.config baseline-ksun-susfs.config
+          grep -E '^(CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|LTO|LTO_CLANG|THINLTO|CC_OPTIMIZE_FOR_PERFORMANCE)=|# CONFIG_(KPROBES|KRETPROBES|LTO_NONE|CC_OPTIMIZE_FOR_SIZE) is not set)' out/.config
+
+          KERNEL_RELEASE="$("${KMAKE[@]}" --no-print-directory -s kernelrelease 2>/dev/null)"
+          echo "Expected kernel release: 4.14.357-Xen-KSUN+2"
+          echo "Actual kernel release:   $KERNEL_RELEASE"
+          test "$KERNEL_RELEASE" = "4.14.357-Xen-KSUN+2" || {
+            echo "::error::Kernel release does not match 4.14.357-Xen-KSUN+2"
+            exit 1
+          }
+
+      - name: Build kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          export KBUILD_BUILD_USER=Lvyana
+          export KBUILD_BUILD_HOST=Xen-Kernel
+          set +e
+          make -j"$(nproc)" O=out ARCH=arm64 SUBARCH=arm64 DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld \
+            LLVM=1 LLVM_IAS=1 CC="ccache clang" Image 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$status" -ne 0 ]; then
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            echo "::error::Kernel compilation failed"
+            exit "$status"
+          fi
+          test -s out/arch/arm64/boot/Image
+          file out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+          cat out/include/config/kernel.release
+          echo "ThinLTO .llvm. symbol count: $(grep -c '\.llvm\.' out/System.map || true)"
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f baseline-ksun-susfs.config ]] || cp baseline-ksun-susfs.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ ! -s out/arch/arm64/boot/Image ]] || cp out/arch/arm64/boot/Image artifacts/
+          [[ ! -f out/include/config/kernel.release ]] || cp out/include/config/kernel.release artifacts/kernel-release.txt
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          if [[ -d KernelSU-Next/.git ]]; then
+            git -C KernelSU-Next rev-parse HEAD > artifacts/ksun-commit.txt 2>/dev/null || true
+            git -C KernelSU-Next diff --stat > artifacts/ksun-compat-diffstat.txt 2>/dev/null || true
+          fi
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel SuSFS + Xen Core artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KSUN-SuSFS-Xen-Core
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ fs/proc/xen_core.c
+          grep -Eq '^#define XEN_CORE_DEVICE[[:space:]]+"vayu"
+          grep -q 'CORE_KEY=X3691QTZ' Documentation/xen-core/README.md
+          grep -q 'FAMILY=Xen-Kernel' Documentation/xen-core/README.md
+          grep -q 'susfs_is_current_ksu_domain' fs/susfs.c
+          grep -Fq 'int path_umount(struct path *path, int flags)' fs/namespace.c
+          git diff --check
+
+      - name: Install pinned KernelSU-Next and apply SuSFS compatibility bridge
+        shell: bash
+        env:
+          KSUN_REPO: https://github.com/Lvyana-ren/KernelSU-Next
+          KSUN_SHA: 465490a26667ba4cf00b3be975a7e28e53978829
+        run: |
+          set -euo pipefail
+          test ! -e KernelSU-Next
+          git clone "$KSUN_REPO" KernelSU-Next
+          git -C KernelSU-Next checkout --detach "$KSUN_SHA"
+          ACTUAL="$(git -C KernelSU-Next rev-parse HEAD)"
+          test "$ACTUAL" = "$KSUN_SHA" || {
+            echo "::error::KSUN SHA mismatch: $ACTUAL"
+            exit 1
+          }
+
+          python3 scripts/apply-ksun-susfs-compat.py KernelSU-Next
+          git -C KernelSU-Next diff --check
+          grep -q 'config KSU_SUSFS' KernelSU-Next/kernel/Kconfig
+          grep -q 'SUSFS_MAGIC' KernelSU-Next/kernel/supercall/supercall.c
+          grep -q 'XEN-SUSFS-KSUN-COMPAT: setuid runtime' KernelSU-Next/kernel/hook/setuid_hook.c
+
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          grep -q 'KSU_MANUAL_HOOK' KernelSU-Next/kernel/Kconfig
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
+          echo "KSUN commit: $ACTUAL"
+          git -C KernelSU-Next log -1 --oneline
+
+      - name: Backport path_umount only if absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q 'int path_umount(struct path \*path, int flags)' fs/namespace.c; then
+            echo "path_umount already present; no backport needed."
+          else
+            echo "::error::path_umount missing; apply a reviewed Linux 4.14 backport before building."
+            exit 1
+          fi
+
+      - name: Apply Xen-Kernel KSUN manual hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-ksun-manual-hooks.py
+          grep -q 'ksu_handle_execveat' fs/exec.c
+          grep -q 'ksu_handle_faccessat' fs/open.c
+          grep -Eq 'ksu_handle_sys_read|ksu_vfs_read_hook' fs/read_write.c
+          grep -q 'ksu_handle_stat' fs/stat.c
+          grep -q 'ksu_handle_sys_reboot' kernel/reboot.c
+          git diff --check
+
+      - name: Configure manual hook, SuSFS, Xen Core and ThinLTO
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          LLVM_VARS=(
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1 LLVM_IAS=1
+          )
+          KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
+          "${KMAKE[@]}" vayu_defconfig
+
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Xen-KSUN+2" \
+            --disable LOCALVERSION_AUTO \
+            --enable MODULES \
+            --disable KPROBES \
+            --disable KRETPROBES \
+            --enable KSU \
+            --enable KSU_MANUAL_HOOK \
+            --disable KSU_KPROBES_HOOK \
+            --disable KSU_SYSCALL_TABLE_HOOK \
+            --enable KSU_SUSFS \
+            --enable KSU_SUSFS_SUS_PATH \
+            --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT \
+            --enable KSU_SUSFS_TRY_UMOUNT \
+            --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG \
+            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT \
+            --enable KSU_SUSFS_SUS_MAP \
+            --disable KSU_SUSFS_SUS_MEMFD \
+            --enable LTO_CLANG \
+            --enable LTO \
+            --enable THINLTO \
+            --disable LTO_NONE \
+            --enable CC_OPTIMIZE_FOR_PERFORMANCE \
+            --disable CC_OPTIMIZE_FOR_SIZE
+
+          "${KMAKE[@]}" olddefconfig
+
+          required=(
+            CONFIG_MODULES CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KSU_SUSFS
+            CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT
+            CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_TRY_UMOUNT
+            CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_ENABLE_LOG
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP
+            CONFIG_LTO CONFIG_LTO_CLANG CONFIG_THINLTO
+            CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+          )
+          for symbol in "${required[@]}"; do
+            grep -q "^$symbol=y$" out/.config || {
+              echo "::error::$symbol is not enabled after olddefconfig"
+              exit 1
+            }
+          done
+
+          for symbol in CONFIG_KPROBES CONFIG_KRETPROBES CONFIG_KSU_KPROBES_HOOK \
+                        CONFIG_KSU_SYSCALL_TABLE_HOOK CONFIG_LTO_NONE CONFIG_CC_OPTIMIZE_FOR_SIZE; do
+            if grep -q "^$symbol=y$" out/.config; then
+              echo "::error::$symbol must remain disabled"
+              exit 1
+            fi
+          done
+
+          # Xen Core is built into fs/proc; verify the object is part of the kernel build.
+          grep -q 'proc-y.*xen_core.o' fs/proc/Makefile
+          test -s fs/proc/xen_core.c
+          cp out/.config baseline-ksun-susfs.config
+          grep -E '^(CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|LTO|LTO_CLANG|THINLTO|CC_OPTIMIZE_FOR_PERFORMANCE)=|# CONFIG_(KPROBES|KRETPROBES|LTO_NONE|CC_OPTIMIZE_FOR_SIZE) is not set)' out/.config
+
+          KERNEL_RELEASE="$("${KMAKE[@]}" --no-print-directory -s kernelrelease 2>/dev/null)"
+          echo "Expected kernel release: 4.14.357-Xen-KSUN+2"
+          echo "Actual kernel release:   $KERNEL_RELEASE"
+          test "$KERNEL_RELEASE" = "4.14.357-Xen-KSUN+2" || {
+            echo "::error::Kernel release does not match 4.14.357-Xen-KSUN+2"
+            exit 1
+          }
+
+      - name: Build kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          export KBUILD_BUILD_USER=Lvyana
+          export KBUILD_BUILD_HOST=Xen-Kernel
+          set +e
+          make -j"$(nproc)" O=out ARCH=arm64 SUBARCH=arm64 DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld \
+            LLVM=1 LLVM_IAS=1 CC="ccache clang" Image 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$status" -ne 0 ]; then
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            echo "::error::Kernel compilation failed"
+            exit "$status"
+          fi
+          test -s out/arch/arm64/boot/Image
+          file out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+          cat out/include/config/kernel.release
+          echo "ThinLTO .llvm. symbol count: $(grep -c '\.llvm\.' out/System.map || true)"
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f baseline-ksun-susfs.config ]] || cp baseline-ksun-susfs.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ ! -s out/arch/arm64/boot/Image ]] || cp out/arch/arm64/boot/Image artifacts/
+          [[ ! -f out/include/config/kernel.release ]] || cp out/include/config/kernel.release artifacts/kernel-release.txt
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          if [[ -d KernelSU-Next/.git ]]; then
+            git -C KernelSU-Next rev-parse HEAD > artifacts/ksun-commit.txt 2>/dev/null || true
+            git -C KernelSU-Next diff --stat > artifacts/ksun-compat-diffstat.txt 2>/dev/null || true
+          fi
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel SuSFS + Xen Core artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KSUN-SuSFS-Xen-Core
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ fs/proc/xen_core.c
+          grep -Eq '^#define XEN_CORE_FEATURE_LEVEL[[:space:]]+"L1"
+          grep -q 'CORE_KEY=X3691QTZ' Documentation/xen-core/README.md
+          grep -q 'FAMILY=Xen-Kernel' Documentation/xen-core/README.md
+          grep -q 'susfs_is_current_ksu_domain' fs/susfs.c
+          grep -Fq 'int path_umount(struct path *path, int flags)' fs/namespace.c
+          git diff --check
+
+      - name: Install pinned KernelSU-Next and apply SuSFS compatibility bridge
+        shell: bash
+        env:
+          KSUN_REPO: https://github.com/Lvyana-ren/KernelSU-Next
+          KSUN_SHA: 465490a26667ba4cf00b3be975a7e28e53978829
+        run: |
+          set -euo pipefail
+          test ! -e KernelSU-Next
+          git clone "$KSUN_REPO" KernelSU-Next
+          git -C KernelSU-Next checkout --detach "$KSUN_SHA"
+          ACTUAL="$(git -C KernelSU-Next rev-parse HEAD)"
+          test "$ACTUAL" = "$KSUN_SHA" || {
+            echo "::error::KSUN SHA mismatch: $ACTUAL"
+            exit 1
+          }
+
+          python3 scripts/apply-ksun-susfs-compat.py KernelSU-Next
+          git -C KernelSU-Next diff --check
+          grep -q 'config KSU_SUSFS' KernelSU-Next/kernel/Kconfig
+          grep -q 'SUSFS_MAGIC' KernelSU-Next/kernel/supercall/supercall.c
+          grep -q 'XEN-SUSFS-KSUN-COMPAT: setuid runtime' KernelSU-Next/kernel/hook/setuid_hook.c
+
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || \
+            printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
+            sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
+          grep -q 'KSU_MANUAL_HOOK' KernelSU-Next/kernel/Kconfig
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig
+          echo "KSUN commit: $ACTUAL"
+          git -C KernelSU-Next log -1 --oneline
+
+      - name: Backport path_umount only if absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q 'int path_umount(struct path \*path, int flags)' fs/namespace.c; then
+            echo "path_umount already present; no backport needed."
+          else
+            echo "::error::path_umount missing; apply a reviewed Linux 4.14 backport before building."
+            exit 1
+          fi
+
+      - name: Apply Xen-Kernel KSUN manual hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/apply-ksun-manual-hooks.py
+          grep -q 'ksu_handle_execveat' fs/exec.c
+          grep -q 'ksu_handle_faccessat' fs/open.c
+          grep -Eq 'ksu_handle_sys_read|ksu_vfs_read_hook' fs/read_write.c
+          grep -q 'ksu_handle_stat' fs/stat.c
+          grep -q 'ksu_handle_sys_reboot' kernel/reboot.c
+          git diff --check
+
+      - name: Configure manual hook, SuSFS, Xen Core and ThinLTO
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          LLVM_VARS=(
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1 LLVM_IAS=1
+          )
+          KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
+          "${KMAKE[@]}" vayu_defconfig
+
+          scripts/config --file out/.config \
+            --set-str LOCALVERSION "-Xen-KSUN+2" \
+            --disable LOCALVERSION_AUTO \
+            --enable MODULES \
+            --disable KPROBES \
+            --disable KRETPROBES \
+            --enable KSU \
+            --enable KSU_MANUAL_HOOK \
+            --disable KSU_KPROBES_HOOK \
+            --disable KSU_SYSCALL_TABLE_HOOK \
+            --enable KSU_SUSFS \
+            --enable KSU_SUSFS_SUS_PATH \
+            --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT \
+            --enable KSU_SUSFS_TRY_UMOUNT \
+            --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG \
+            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT \
+            --enable KSU_SUSFS_SUS_MAP \
+            --disable KSU_SUSFS_SUS_MEMFD \
+            --enable LTO_CLANG \
+            --enable LTO \
+            --enable THINLTO \
+            --disable LTO_NONE \
+            --enable CC_OPTIMIZE_FOR_PERFORMANCE \
+            --disable CC_OPTIMIZE_FOR_SIZE
+
+          "${KMAKE[@]}" olddefconfig
+
+          required=(
+            CONFIG_MODULES CONFIG_KSU CONFIG_KSU_MANUAL_HOOK CONFIG_KSU_SUSFS
+            CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MOUNT
+            CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_TRY_UMOUNT
+            CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_ENABLE_LOG
+            CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+            CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+            CONFIG_KSU_SUSFS_OPEN_REDIRECT CONFIG_KSU_SUSFS_SUS_MAP
+            CONFIG_LTO CONFIG_LTO_CLANG CONFIG_THINLTO
+            CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+          )
+          for symbol in "${required[@]}"; do
+            grep -q "^$symbol=y$" out/.config || {
+              echo "::error::$symbol is not enabled after olddefconfig"
+              exit 1
+            }
+          done
+
+          for symbol in CONFIG_KPROBES CONFIG_KRETPROBES CONFIG_KSU_KPROBES_HOOK \
+                        CONFIG_KSU_SYSCALL_TABLE_HOOK CONFIG_LTO_NONE CONFIG_CC_OPTIMIZE_FOR_SIZE; do
+            if grep -q "^$symbol=y$" out/.config; then
+              echo "::error::$symbol must remain disabled"
+              exit 1
+            fi
+          done
+
+          # Xen Core is built into fs/proc; verify the object is part of the kernel build.
+          grep -q 'proc-y.*xen_core.o' fs/proc/Makefile
+          test -s fs/proc/xen_core.c
+          cp out/.config baseline-ksun-susfs.config
+          grep -E '^(CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|LTO|LTO_CLANG|THINLTO|CC_OPTIMIZE_FOR_PERFORMANCE)=|# CONFIG_(KPROBES|KRETPROBES|LTO_NONE|CC_OPTIMIZE_FOR_SIZE) is not set)' out/.config
+
+          KERNEL_RELEASE="$("${KMAKE[@]}" --no-print-directory -s kernelrelease 2>/dev/null)"
+          echo "Expected kernel release: 4.14.357-Xen-KSUN+2"
+          echo "Actual kernel release:   $KERNEL_RELEASE"
+          test "$KERNEL_RELEASE" = "4.14.357-Xen-KSUN+2" || {
+            echo "::error::Kernel release does not match 4.14.357-Xen-KSUN+2"
+            exit 1
+          }
+
+      - name: Build kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          export KBUILD_BUILD_USER=Lvyana
+          export KBUILD_BUILD_HOST=Xen-Kernel
+          set +e
+          make -j"$(nproc)" O=out ARCH=arm64 SUBARCH=arm64 DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld \
+            LLVM=1 LLVM_IAS=1 CC="ccache clang" Image 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$status" -ne 0 ]; then
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            echo "::error::Kernel compilation failed"
+            exit "$status"
+          fi
+          test -s out/arch/arm64/boot/Image
+          file out/arch/arm64/boot/Image
+          ls -lh out/arch/arm64/boot/Image
+          cat out/include/config/kernel.release
+          echo "ThinLTO .llvm. symbol count: $(grep -c '\.llvm\.' out/System.map || true)"
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f baseline-ksun-susfs.config ]] || cp baseline-ksun-susfs.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ ! -s out/arch/arm64/boot/Image ]] || cp out/arch/arm64/boot/Image artifacts/
+          [[ ! -f out/include/config/kernel.release ]] || cp out/include/config/kernel.release artifacts/kernel-release.txt
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          if [[ -d KernelSU-Next/.git ]]; then
+            git -C KernelSU-Next rev-parse HEAD > artifacts/ksun-commit.txt 2>/dev/null || true
+            git -C KernelSU-Next diff --stat > artifacts/ksun-compat-diffstat.txt 2>/dev/null || true
+          fi
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel SuSFS + Xen Core artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KSUN-SuSFS-Xen-Core
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ fs/proc/xen_core.c
+          grep -q 'seq_printf(m, "CORE_KEY=%s\\n", XEN_CORE_KEY)' fs/proc/xen_core.c
+          grep -q 'seq_printf(m, "FAMILY=%s\\n", XEN_CORE_FAMILY)' fs/proc/xen_core.c
           grep -q 'CORE_KEY=X3691QTZ' Documentation/xen-core/README.md
           grep -q 'FAMILY=Xen-Kernel' Documentation/xen-core/README.md
           grep -q 'susfs_is_current_ksu_domain' fs/susfs.c
