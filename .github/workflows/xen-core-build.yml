@@ -110,7 +110,13 @@ jobs:
           grep -q 'proc_create("xen_core", 0444' fs/proc/xen_core.c
           # xen_core.c emits manifest values through macros, so validate the
           # macro definitions rather than searching for expanded output strings.
-          grep -Eq '^#define XEN_CORE_KEY[[:space:]]+"X3691QTZ"
+          grep -Eq '^#define XEN_CORE_KEY[[:space:]]+"X3691QTZ"$' fs/proc/xen_core.c
+          grep -Eq '^#define XEN_CORE_FAMILY[[:space:]]+"Xen-Kernel"$' fs/proc/xen_core.c
+          grep -Eq '^#define XEN_CORE_VERSION[[:space:]]+"KSUN[+]4"$' fs/proc/xen_core.c
+          grep -Eq '^#define XEN_CORE_DEVICE[[:space:]]+"vayu"$' fs/proc/xen_core.c
+          grep -Eq '^#define XEN_CORE_FEATURE_LEVEL[[:space:]]+"L1"$' fs/proc/xen_core.c
+          grep -q 'seq_printf(m, "CORE_KEY=%s' fs/proc/xen_core.c
+          grep -q 'seq_printf(m, "FAMILY=%s' fs/proc/xen_core.c
           grep -q 'CORE_KEY=X3691QTZ' Documentation/xen-core/README.md
           grep -q 'FAMILY=Xen-Kernel' Documentation/xen-core/README.md
           grep -q 'susfs_is_current_ksu_domain' fs/susfs.c
