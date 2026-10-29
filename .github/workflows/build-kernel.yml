@@ -1,13 +1,16 @@
-name: Xen-Kernel - Default
+name: Xen-Kernel - HyperOS Compatibility Build
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - HyperOS
 
 permissions:
   contents: read
 
 concurrency:
-  group: xen-default-${{ github.ref }}
+  group: xen-hyperos-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -28,7 +31,7 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16"
+          ref: "${{ github.ref_name }}"
           fetch-depth: 1
           lfs: true
 
@@ -318,7 +321,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-Default
+          name: Xen-Kernel-HyperOS
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
