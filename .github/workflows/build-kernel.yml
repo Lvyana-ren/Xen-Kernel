@@ -187,7 +187,7 @@ jobs:
           "${KMAKE[@]}" vayu_defconfig
 
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen-KSUN+2" \
+            --set-str LOCALVERSION "-Xen-KSUN+3" \
             --disable LOCALVERSION_AUTO \
             --enable MODULES \
             --disable KPROBES \
