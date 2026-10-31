@@ -217,26 +217,28 @@ static int qc3_get_bms_fastcharge_mode(void)
 /* get thermal level from battery power supply property */
 static int qc3_get_batt_current_thermal_level(int *level)
 {
-	int ret, rc;
+	int ret;
 	struct power_supply *psy;
 	union power_supply_propval val = {0,};
 
+	if (!level)
+		return -EINVAL;
+
 	psy = cp_get_sw_psy();
 	if (!psy)
-		return 0;
+		return -ENODEV;
 
 	ret = power_supply_get_property(psy,
 			POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT, &val);
-
-	if (rc < 0) {
-		pr_info("Couldn't get themal level:%d\n", rc);
-		return rc;
+	if (ret < 0) {
+		pr_info("Couldn't get thermal level: %d\n", ret);
+		return ret;
 	}
 
-	pr_err("val.intval: %d\n", val.intval);
-
 	*level = val.intval;
-	return rc;
+	pr_info("thermal level: %d\n", *level);
+
+	return 0;
 }
 
 /* determine whether to disable cp according to jeita status */
@@ -643,7 +645,7 @@ static int cp_get_qc_hvdcp3_type(void)
 			POWER_SUPPLY_PROP_HVDCP3_TYPE, &val);
 	if (!ret)
 		pm_state.hvdcp3_type = val.intval;
-	pr_info("hvdcp3 type %s\n", pm_state.hvdcp3_type);
+	pr_info("hvdcp3 type: %d\n", pm_state.hvdcp3_type);
 	return ret;
 }
 
