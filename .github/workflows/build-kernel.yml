@@ -247,10 +247,10 @@ jobs:
           grep -E '^(CONFIG_(KSU|KSU_MANUAL_HOOK|KSU_SUSFS|LTO|LTO_CLANG|THINLTO|CC_OPTIMIZE_FOR_PERFORMANCE)=|# CONFIG_(KPROBES|KRETPROBES|LTO_NONE|CC_OPTIMIZE_FOR_SIZE) is not set)' out/.config
 
           KERNEL_RELEASE="$("${KMAKE[@]}" --no-print-directory -s kernelrelease 2>/dev/null)"
-          echo "Expected kernel release: 4.14.357-Xen-KSUN+2"
+          echo "Expected kernel release: 4.14.357-Xen-KSUN+3"
           echo "Actual kernel release:   $KERNEL_RELEASE"
-          test "$KERNEL_RELEASE" = "4.14.357-Xen-KSUN+2" || {
-            echo "::error::Kernel release does not match 4.14.357-Xen-KSUN+2"
+          test "$KERNEL_RELEASE" = "4.14.357-Xen-KSUN+3" || {
+            echo "::error::Kernel release does not match 4.14.357-Xen-KSUN+3"
             exit 1
           }
 
