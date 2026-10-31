@@ -10,7 +10,7 @@
 #include <linux/seq_file.h>
 
 #define XEN_CORE_FAMILY        "Xen-Kernel"
-#define XEN_CORE_VERSION       "KSUN+2"
+#define XEN_CORE_VERSION       "XenIF-v1"
 #define XEN_CORE_DEVICE        "vayu"
 #define XEN_CORE_KEY           "X3691QTZ"
 #define XEN_CORE_FEATURE_LEVEL "L1"
