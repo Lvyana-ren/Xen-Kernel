@@ -1,16 +1,16 @@
-name: Xen-Kernel KSUN + SuSFS
+name: Xen-Kernel Charging Experiment (KSUN)
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - 16-KSUN_SuSFS
+      - KSUN
 
 permissions:
   contents: read
 
 concurrency:
-  group: xen-ksun-susfs-${{ github.ref }}
+  group: xen-ksun-charging-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -30,7 +30,7 @@ jobs:
       - name: Checkout Xen-Kernel
         uses: actions/checkout@v4
         with:
-          ref: 16-KSUN_SuSFS
+          ref: KSUN
           fetch-depth: 1
 
       - name: Install build dependencies
@@ -309,7 +309,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KSUN-SuSFS
+          name: Xen-Kernel-KSUN-Charging
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
