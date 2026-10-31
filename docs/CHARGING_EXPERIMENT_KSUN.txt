@@ -1,0 +1,58 @@
+XEN-KERNEL CHARGING EXPERIMENT
+Branch: KSUN
+Base commit: bebb035d24c5876089b78de6bb0246cefcebdf43
+Date: 2026-10-31
+
+SCOPE
+This patch is a conservative first pass. It fixes deterministic QC3
+state-machine defects and makes the existing GitHub Actions workflow
+actually build the KSUN branch. It does not force higher current limits.
+
+CHANGES
+
+1. drivers/power/supply/ti/cp_qc30.c
+   - Fixed qc3_get_batt_current_thermal_level():
+     * Removed uninitialized rc usage.
+     * Checks the actual return value from power_supply_get_property().
+     * Returns -EINVAL for a NULL output pointer.
+     * Returns -ENODEV when the battery power_supply is unavailable.
+     * Returns the real negative property-read error.
+     * Returns 0 only after a successful read and output assignment.
+   - Fixed HVDCP3 type log format from %s to %d. The property is an
+     integer enum (HVDCP3_NONE / CLASSA / CLASSB), not a string pointer.
+
+2. .github/workflows/build-kernel.yml
+   - Workflow display name updated for charging experiment.
+   - Push trigger changed to branch KSUN.
+   - Checkout ref changed to KSUN.
+   - Concurrency group and artifact name updated for KSUN charging build.
+   - Existing compiler, kernel config, build and artifact collection steps
+     otherwise retained.
+
+INTENTIONALLY NOT CHANGED
+
+- No FCC, USB ICL, float-voltage, thermal mitigation, QC3 Class A/B,
+  PPS, or charge-pump current limits were raised.
+- No BQ25970 or LN8000 hardware protection was disabled or bypassed.
+- PPS battery authentication temporary bypass was not removed. Doing so
+  without verifying the runtime AUTHENTIC property and battery identity
+  provider can disable the PPS path unexpectedly.
+- Duplicate charging DTS properties were not edited: the intended final
+  table cannot be inferred safely from source text alone. Validate the
+  compiled DTB and compare against a known-good vayu stock DTB first.
+- Workflow currently builds Image only. DTS/DTBO changes are not part of
+  this patch; a correct device-tree artifact/packaging path must be added
+  after confirming the ROM boot image expects a standalone dtbo or
+  appended overlays.
+
+VALIDATION REQUIRED
+- GitHub Actions compile result.
+- On-device QC3 enum, PD/PPS status, FCC and USB_ICL effective voters.
+- Battery temperature, charge-pump VBUS/IBUS/VBAT/IBAT and fault flags.
+- Sustained input power and battery-side charging power; report separately.
+- Verify no unexpected fallback from PPS/QC3 and no charging regressions.
+
+SAFETY NOTE
+Peak power depends on adapter protocol, cable, battery temperature/SOC,
+battery verification, PMIC votes, charge-pump topology and hardware limits.
+A source-level limit alone does not guarantee >20W.
