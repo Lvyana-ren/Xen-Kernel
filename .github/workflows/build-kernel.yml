@@ -28,9 +28,23 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "16"
+          # Build the exact branch/ref selected in workflow_dispatch.
+          ref: ${{ github.ref }}
           fetch-depth: 1
           lfs: true
+
+      - name: Verify selected source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          echo "Selected ref: ${GITHUB_REF}"
+          echo "Expected SHA: ${GITHUB_SHA}"
+          echo "Checked out:  ${ACTUAL_SHA}"
+          if [[ "${ACTUAL_SHA}" != "${GITHUB_SHA}" ]]; then
+            echo "::error::Checkout does not match the workflow dispatch revision."
+            exit 1
+          fi
 
       - name: Install build dependencies
         shell: bash
