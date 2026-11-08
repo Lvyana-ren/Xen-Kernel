@@ -48,3 +48,7 @@ Xen-Kernel is an experimental project. Builds may contain bugs, instability, or 
 * Contributors and testers who help improve the project.
 
 **XEN-KERNEL — Smooth. Faster. Stable.**
+
+### OxygenOS port compatibility (experimental)
+
+This branch includes a Xen ROM-mode selector for AOSP, OEM and OxygenOS. See [Xen OxygenOS Compatibility](Documentation/Xen-OxygenOS-Compatibility.md) for kernel arguments, interface, RE404-derived installer notes and the device validation checklist. The selector is not itself proof of OOS boot support; matching vendor/firmware/DTBO and on-device testing are still required.
