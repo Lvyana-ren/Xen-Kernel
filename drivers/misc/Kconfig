@@ -652,3 +652,15 @@ config OKL4_LINK_SHBUF
 	      transport. This driver presents the link to Linux as a character device
 	      which can be written to or read from to access the shared memory. An ioctl
 	      on the device is used to send a virtual interrupt to the partner cell.
+
+config XEN_ROM_COMPAT
+	bool "Xen ROM compatibility selector"
+	depends on ARCH_QCOM
+	default y
+	help
+	  Enable Xen's early ROM-mode selector. The xen_args kernel command
+	  line accepts rom_auto, rom_aosp, rom_oem and rom_oos (rom_oxygen
+	  is an alias). The selected mode is exposed read-only at
+	  /sys/kernel/xen_rom/mode. This selector does not automatically
+	  change DTBO or disable drivers; ROM-specific code must explicitly
+	  use the exported xen_rom_get_type()/xen_rom_is_oos() helpers.
