@@ -2,6 +2,8 @@
 #ifndef _LINUX_XEN_ROM_COMPAT_H
 #define _LINUX_XEN_ROM_COMPAT_H
 
+#include <linux/types.h>
+
 enum xen_rom_type {
 	XEN_ROM_AUTO = 0,
 	XEN_ROM_AOSP = 1,
