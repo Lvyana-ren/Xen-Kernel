@@ -80,7 +80,7 @@ static ssize_t mode_show(struct kobject *kobj,
 {
 	int type = xen_rom_get_type();
 
-	return sysfs_emit(buf, "%s (%d)\n", xen_rom_name(type), type);
+	return scnprintf(buf, PAGE_SIZE, "%s (%d)\n", xen_rom_name(type), type);
 }
 static struct kobj_attribute mode_attr = __ATTR_RO(mode);
 
