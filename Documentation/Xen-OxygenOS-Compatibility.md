@@ -59,3 +59,22 @@ RE404 binary merely because both installers label it OEM.
 5. Reboot to the previous ROM and run a regression check.
 
 A successful compile or mode read is **not** proof of OxygenOS boot compatibility.
+
+
+## Installer-to-kernel argument bridge (experimental)
+
+RE404's installer writes its selected profile into the boot image command line
+using `patch_cmdline "e404_args"`. Xen's early parser is separate and expects
+`xen_args`. Until a Xen installer explicitly writes this key, selecting an
+OxygenOS profile in an installer will **not** activate `xen_rom_is_oos()`.
+
+For a controlled test, append `xen_args=rom_oos` to the existing kernel command
+line without removing any existing arguments. Confirm it survives boot by
+checking `/sys/kernel/xen_rom/mode` and `dmesg | grep Xen-ROM`.
+
+RE404 installer profiles (OEM DTBO, 120Hz, IR0, default battery, touchscreen
+mod disabled) are device/firmware choices, not generic OxygenOS settings.
+Do not copy its DTBO or battery profile into Xen by default: use the exact OOS
+port's matching DTBO and battery/charger configuration. The RE404 6000mAh
+battery selection is an explicit alternate profile and must only be enabled
+when the physical battery and fuel-gauge calibration match it.
