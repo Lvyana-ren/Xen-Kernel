@@ -7,6 +7,8 @@
  * consumers must opt in after their dependencies have been audited.
  */
 #include <linux/init.h>
+#include <linux/module.h>
+#include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/kobject.h>
 #include <linux/string.h>
