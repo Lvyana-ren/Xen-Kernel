@@ -2,6 +2,9 @@ name: Xen-Kernel - Default
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - Oxygen-OS
 
 permissions:
   contents: read
