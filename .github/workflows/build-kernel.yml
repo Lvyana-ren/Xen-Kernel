@@ -1,4 +1,4 @@
-name: Xen-Kernel - Default
+name: Xen-Kernel - OxygenOS Beta
 
 on:
   workflow_dispatch:
@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: xen-default-${{ github.ref }}
+  group: xen-oos-beta-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -161,7 +161,7 @@ jobs:
           grep -n 'default_compressor' drivers/block/zram/zram_drv.c
           git diff --check
 
-      - name: Configure optimized vayu kernel
+      - name: Configure optimized OxygenOS vayu kernel
         shell: bash
         run: |
           set -euo pipefail
@@ -236,7 +236,7 @@ jobs:
 
           make kernelversion
 
-      - name: Compile Xen-Kernel Image
+      - name: Compile Xen-Kernel Image and vayu device trees
         shell: bash
         run: |
           set -uo pipefail
@@ -265,7 +265,7 @@ jobs:
             LLVM=1 \
             LLVM_IAS=1 \
             CC="ccache clang" \
-            Image 2>&1 | tee build.log
+            Image dtbs 2>&1 | tee build.log
           BUILD_STATUS=${PIPESTATUS[0]}
           set -e
           ccache -s || true
@@ -275,6 +275,8 @@ jobs:
             exit "$BUILD_STATUS"
           fi
 
+          test -s out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb
+          test -s out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo
           IMAGE="out/arch/arm64/boot/Image"
           if [ ! -s "$IMAGE" ]; then
             echo "::error::Kernel Image is missing or empty."
@@ -319,6 +321,12 @@ jobs:
           if [[ -s out/arch/arm64/boot/dtb.img ]]; then
             cp out/arch/arm64/boot/dtb.img artifacts/
           fi
+          if [[ -s out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb ]]; then
+            cp out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb artifacts/vayu-sm8150-base.dtb
+          fi
+          if [[ -s out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo ]]; then
+            cp out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo artifacts/vayu-sm8150-overlay.dtbo
+          fi
           if [[ -f out/include/config/kernel.release ]]; then
             cp out/include/config/kernel.release artifacts/kernel-release.txt
           fi
@@ -332,7 +340,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-Default
+          name: Xen-Kernel-OxygenOS-Beta
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
