@@ -610,9 +610,13 @@ struct devfreq *devfreq_add_device(struct device *dev,
 
 	governor = find_devfreq_governor(devfreq->governor_name);
 	if (IS_ERR(governor)) {
-		dev_err(dev, "%s: Unable to find governor for the device\n",
-			__func__);
-		err = PTR_ERR(governor);
+		dev_err(dev, "%s: governor '%s' is not registered; defer probe\n",
+			__func__, devfreq->governor_name);
+		/*
+		 * Devfreq governors may register later in the init sequence.
+		 * Let the driver core retry instead of leaving devbw unbound.
+		 */
+		err = -EPROBE_DEFER;
 		goto err_init;
 	}
 
