@@ -179,7 +179,7 @@ jobs:
           )
           KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
 
-          "${KMAKE[@]}" vayu_defconfig
+          "${KMAKE[@]}" vayu_oxygenos_defconfig
 
           scripts/config --file out/.config \
             --set-str LOCALVERSION "-Xen+3" \
@@ -192,6 +192,32 @@ jobs:
             --disable CC_OPTIMIZE_FOR_SIZE 
             
           "${KMAKE[@]}" olddefconfig
+
+          echo "===== OxygenOS Android/vendor ABI configuration audit ====="
+          required_config=(
+            CONFIG_ANDROID_BINDER_IPC=y
+            CONFIG_ANDROID_BINDERFS=y
+            'CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"'
+            CONFIG_CGROUPS=y
+            CONFIG_CPUSETS=y
+            CONFIG_CGROUP_CPUACCT=y
+            CONFIG_BLK_CGROUP=y
+            CONFIG_PROC_FS=y
+            CONFIG_SYSFS=y
+            CONFIG_SECURITY_SELINUX=y
+            CONFIG_DEFAULT_SECURITY_SELINUX=y
+            CONFIG_MACH_XIAOMI=y
+            CONFIG_MACH_XIAOMI_SM8150=y
+            CONFIG_MACH_XIAOMI_VAYU=y
+            CONFIG_BUILD_ARM64_DT_OVERLAY=y
+          )
+          for item in "${required_config[@]}"; do
+            if ! grep -Fqx "${item}" out/.config; then
+              echo "::error::Required OxygenOS ABI config missing: ${item}"
+              exit 1
+            fi
+          done
+          echo "All baseline Android/vendor ABI requirements are present."
 
           echo "===== Effective LTO / optimization / governor configuration ====="
           grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ|CPU_FREQ_GOV_SCHEDUTIL|CPU_FREQ_DEFAULT_GOV))=|^# CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_GOV_SCHEDUTIL) is not set' out/.config || true
@@ -330,6 +356,10 @@ jobs:
           if [[ -f out/include/config/kernel.release ]]; then
             cp out/include/config/kernel.release artifacts/kernel-release.txt
           fi
+          {
+            echo "# OxygenOS Android/vendor ABI config"
+            grep -E '^(CONFIG_(ANDROID_BINDER_IPC|ANDROID_BINDERFS|ANDROID_BINDER_DEVICES|CGROUPS|CPUSETS|CGROUP_CPUACCT|BLK_CGROUP|PROC_FS|SYSFS|SECURITY_SELINUX|DEFAULT_SECURITY_SELINUX|MACH_XIAOMI|MACH_XIAOMI_SM8150|MACH_XIAOMI_VAYU|BUILD_ARM64_DT_OVERLAY))=' out/.config || true
+          } > artifacts/oxygenos-abi-config.txt
           git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
           clang --version > artifacts/clang-version.txt 2>&1 || true
           ccache -s > artifacts/ccache-stats.txt 2>&1 || true
