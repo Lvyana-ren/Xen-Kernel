@@ -584,13 +584,25 @@ struct devfreq *devfreq_add_device(struct device *dev,
 	devfreq_set_freq_limits(devfreq);
 
 	dev_set_name(&devfreq->dev, "%s", dev_name(dev));
-	err = device_register(&devfreq->dev);
-	if (err) {
-		mutex_unlock(&devfreq->lock);
+
+	/* Resolve the governor before registering/publishing the devfreq device. */
+	mutex_unlock(&devfreq->lock);
+	mutex_lock(&devfreq_list_lock);
+	governor = find_devfreq_governor(devfreq->governor_name);
+	mutex_unlock(&devfreq_list_lock);
+	if (IS_ERR(governor)) {
+		dev_err(dev, "%s: governor '%s' is not registered; defer probe\\n",
+			__func__, devfreq->governor_name);
+		err = -EPROBE_DEFER;
 		goto err_dev;
 	}
+	devfreq->governor = governor;
 
-	devfreq->trans_table =	devm_kzalloc(&devfreq->dev,
+	err = device_register(&devfreq->dev);
+	if (err)
+		goto err_dev;
+
+	devfreq->trans_table = devm_kzalloc(&devfreq->dev,
 						sizeof(unsigned int) *
 						devfreq->profile->max_state *
 						devfreq->profile->max_state,
@@ -600,25 +612,11 @@ struct devfreq *devfreq_add_device(struct device *dev,
 						devfreq->profile->max_state,
 						GFP_KERNEL);
 	devfreq->last_stat_updated = jiffies;
-
 	srcu_init_notifier_head(&devfreq->transition_notifier_list);
-
-	mutex_unlock(&devfreq->lock);
 
 	mutex_lock(&devfreq_list_lock);
 	list_add(&devfreq->node, &devfreq_list);
-
-	governor = find_devfreq_governor(devfreq->governor_name);
-	if (IS_ERR(governor)) {
-		dev_err(dev, "%s: governor '%s' is not registered; defer probe\n",
-			__func__, devfreq->governor_name);
-		/*
-		 * Devfreq governors may register later in the init sequence.
-		 * Let the driver core retry instead of leaving devbw unbound.
-		 */
-		err = -EPROBE_DEFER;
-		goto err_init;
-	}
+	mutex_unlock(&devfreq_list_lock);
 
 	devfreq->governor = governor;
 	err = devfreq->governor->event_handler(devfreq, DEVFREQ_GOV_START,
@@ -633,13 +631,9 @@ struct devfreq *devfreq_add_device(struct device *dev,
 	return devfreq;
 
 err_init:
-	/* device_unregister() invokes devfreq_dev_release(), which removes
-	 * devfreq->node from devfreq_list. Do not list_del() here as well.
-	 */
 	mutex_unlock(&devfreq_list_lock);
-
 	device_unregister(&devfreq->dev);
-	/* The device release callback owns devfreq after device_register(). */
+	/* The release callback owns devfreq after successful registration. */
 	return ERR_PTR(err);
 err_dev:
 	/* device_register() failed: release callback will not run. */
