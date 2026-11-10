@@ -639,9 +639,15 @@ err_init:
 	mutex_unlock(&devfreq_list_lock);
 
 	device_unregister(&devfreq->dev);
+	/* The device release callback owns devfreq after device_register(). */
+	return ERR_PTR(err);
 err_dev:
-	if (devfreq)
+	/* device_register() failed: release callback will not run. */
+	if (devfreq) {
+		mutex_destroy(&devfreq->lock);
+		mutex_destroy(&devfreq->event_lock);
 		kfree(devfreq);
+	}
 err_out:
 	return ERR_PTR(err);
 }
