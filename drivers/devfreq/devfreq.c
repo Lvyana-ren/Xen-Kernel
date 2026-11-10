@@ -629,7 +629,9 @@ struct devfreq *devfreq_add_device(struct device *dev,
 	return devfreq;
 
 err_init:
-	list_del(&devfreq->node);
+	/* device_unregister() invokes devfreq_dev_release(), which removes
+	 * devfreq->node from devfreq_list. Do not list_del() here as well.
+	 */
 	mutex_unlock(&devfreq_list_lock);
 
 	device_unregister(&devfreq->dev);
