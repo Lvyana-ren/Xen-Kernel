@@ -1,0 +1,1 @@
+The OPLUS-13-Subsystems-Xen-OOS.zip source archive contains 174 files under package/drivers/oplus plus package/MANIFEST.txt. The GitHub connector can write text blobs, but cannot receive the local ZIP binary as an archive upload. This marker is temporary and does not contain the imported drivers.
