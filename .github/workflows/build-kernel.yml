@@ -181,6 +181,9 @@ jobs:
 
           "${KMAKE[@]}" vayu_oxygenos_defconfig
 
+          # Enable OPlus subsystem menu and selected vendor drivers
+          scripts/config --file out/.config --enable OPLUS_FEATURES
+
           scripts/config --file out/.config \
             --set-str LOCALVERSION "-Xen+3" \
             --disable LOCALVERSION_AUTO \
