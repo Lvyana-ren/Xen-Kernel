@@ -8,7 +8,6 @@ config OPLUS_FEATURES
 	  Process Reclaim, Midas, etc.).
 
 if OPLUS_FEATURES
-source "drivers/oplus/hans/Kconfig"
 source "drivers/oplus/frame_boost/Kconfig"
 source "drivers/oplus/midas/Kconfig"
 source "drivers/oplus/vnet/Kconfig"
