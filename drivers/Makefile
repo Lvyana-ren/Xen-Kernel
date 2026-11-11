@@ -193,3 +193,6 @@ obj-$(CONFIG_TRUSTY)		+= trusty/
 # GNSS driver
 obj-$(CONFIG_GNSS_SIRF)		+= gnsssirf/
 obj-$(CONFIG_GNSS)		+= gnss/
+
+# OPlus vendor subsystem drivers (OxygenOS integration)
+obj-y += oplus/
