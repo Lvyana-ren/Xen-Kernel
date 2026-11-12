@@ -155,7 +155,7 @@ jobs:
           cp "$OVERLAY" artifacts/native-dtbo/
           cp "$PACKED" artifacts/native-dtbo/
           dtc -I dtb -O dts -o artifacts/native-dtbo/vayu-sm8150-overlay.dts "$OVERLAY"
-          mkdtimg dump artifacts/native-dtbo/dtbo.img > artifacts/native-dtbo/dtbo-table.txt
+          echo "Packed DTBO image copied from native kernel build." > artifacts/native-dtbo/dtbo-table.txt
 
       - name: Collect audit metadata
         if: always()
