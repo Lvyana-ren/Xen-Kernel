@@ -150,12 +150,7 @@ jobs:
           mkdir -p artifacts/native-dtbo
           cp "$OVERLAY" artifacts/native-dtbo/
           cp "$PACKED" artifacts/native-dtbo/
-          # DTBO overlays may contain unresolved external phandles/fixups when decompiled.
-          # Keep the compiled binary as the source of truth; decompile only for inspection.
-          if ! dtc -I dtb -O dts -o artifacts/native-dtbo/vayu-sm8150-overlay.dts "$OVERLAY"; then
-            echo "::warning::Overlay decompile failed; compiled DTBO is preserved."
-            rm -f artifacts/native-dtbo/vayu-sm8150-overlay.dts
-          fi
+          # Skip overlay decompile: DTBO binary is the authoritative audit output.
           echo "Packed DTBO image copied from native kernel build." > artifacts/native-dtbo/dtbo-table.txt
 
       - name: Collect audit metadata
