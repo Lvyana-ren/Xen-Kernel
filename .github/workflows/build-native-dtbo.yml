@@ -113,8 +113,12 @@ jobs:
           cp out/.config native-dt.config
           grep -E '^(CONFIG_(MACH_XIAOMI|MACH_XIAOMI_SM8150|MACH_XIAOMI_VAYU|BUILD_ARM64_DT_OVERLAY))=' out/.config || true
 
-      - name: Build base DTB
-        if: ${{ inputs.build_base_dtb }}
+      # In this kernel tree, Xiaomi DTB/DTBO targets are declared under
+      # arch/arm64/boot/dts/qcom. Calling the bare filename from the top
+      # level fails ("No rule to make target arch/arm64/boot/dts/<name>").
+      # Build through the supported aggregate target, then collect exact files.
+      - name: Build device-tree targets
+        if: ${{ inputs.build_base_dtb || inputs.build_overlay }}
         shell: bash
         run: |
           set -euo pipefail
@@ -125,34 +129,32 @@ jobs:
             CLANG_TRIPLE=aarch64-linux-gnu- \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LLVM=1 LLVM_IAS=1 DTC_EXT=dtc sm8150-xiaomi.dtb
-          test -s out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb
-          mkdir -p artifacts/native-dtb
-          cp out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb artifacts/native-dtb/vayu-sm8150-base.dtb
-          dtc -I dtb -O dts -o artifacts/native-dtb/vayu-sm8150-base.dts \
-            out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb
+            LLVM=1 LLVM_IAS=1 DTC_EXT=dtc dtbs
 
-      - name: Build vayu overlay and packed DTBO
+      - name: Collect base DTB
+        if: ${{ inputs.build_base_dtb }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DTB="out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb"
+          test -s "$DTB"
+          mkdir -p artifacts/native-dtb
+          cp "$DTB" artifacts/native-dtb/vayu-sm8150-base.dtb
+          dtc -I dtb -O dts -o artifacts/native-dtb/vayu-sm8150-base.dts "$DTB"
+
+      - name: Collect overlay and packed DTBO
         if: ${{ inputs.build_overlay }}
         shell: bash
         run: |
           set -euo pipefail
-          export PATH="$HOME/clang/bin:$PATH"
-          MAKE_ARGS=(ARCH=arm64 O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
-            HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld
-            CLANG_TRIPLE=aarch64-linux-gnu-
-            CROSS_COMPILE=aarch64-linux-gnu-
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-            LLVM=1 LLVM_IAS=1 DTC_EXT=dtc)
-          make -j"$(nproc)" "${MAKE_ARGS[@]}" vayu-sm8150-overlay.dtbo
-          test -s out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo
-          make -j"$(nproc)" "${MAKE_ARGS[@]}" dtbo.img
-          test -s out/arch/arm64/boot/dtbo.img
+          OVERLAY="out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo"
+          PACKED="out/arch/arm64/boot/dtbo.img"
+          test -s "$OVERLAY"
+          test -s "$PACKED"
           mkdir -p artifacts/native-dtbo
-          cp out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo artifacts/native-dtbo/
-          cp out/arch/arm64/boot/dtbo.img artifacts/native-dtbo/
-          dtc -I dtb -O dts -o artifacts/native-dtbo/vayu-sm8150-overlay.dts \
-            out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo
+          cp "$OVERLAY" artifacts/native-dtbo/
+          cp "$PACKED" artifacts/native-dtbo/
+          dtc -I dtb -O dts -o artifacts/native-dtbo/vayu-sm8150-overlay.dts "$OVERLAY"
           mkdtimg dump artifacts/native-dtbo/dtbo.img > artifacts/native-dtbo/dtbo-table.txt
 
       - name: Collect audit metadata
@@ -173,7 +175,7 @@ jobs:
             echo "Overlay target: vayu-sm8150-overlay.dtbo"
             echo "Donor DTB/DTBO files are not downloaded or used."
           } > artifacts/BUILD-INFO.txt
-          find artifacts -type f -exec ls -lh {} \\\;
+          find artifacts -type f -exec ls -lh {} \\;
 
       - name: Upload native Xen DTB/DTBO artifacts
         if: always()
