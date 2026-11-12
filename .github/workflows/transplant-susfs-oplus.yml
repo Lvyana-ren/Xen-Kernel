@@ -1,0 +1,56 @@
+name: Transplant SUSFS callsites into Oplus-KSUN
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/transplant-susfs-oplus.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xen-susfs-transplant-oplus
+  cancel-in-progress: false
+
+jobs:
+  transplant:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Oplus-KSUN-SuSFS
+          fetch-depth: 0
+      - name: Cherry-pick SUSFS integration series (preserve OPLUS base)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin 16-KSUN_SuSFS
+          # Callsite series from the validated 16-KSUN_SuSFS integration.
+          # If any OPLUS-specific context conflicts, stop; never auto-resolve/overwrite.
+          commits=(
+            3ad65e4df422
+            9b1311898b74
+            af216cf09e25
+            231b1cc02716
+            21a130d46861
+            f561231db295
+            1c65f5765978
+            ca651a5a2154
+          )
+          for sha in "${commits[@]}"; do
+            git cherry-pick "${sha}"
+          done
+          git diff --check
+          echo "===== SUSFS integration markers ====="
+          for f in fs/namei.c fs/readdir.c fs/namespace.c fs/proc_namespace.c fs/proc/fd.c fs/stat.c fs/statfs.c fs/open.c fs/proc/task_mmu.c mm/memory.c kernel/kallsyms.c security/selinux/avc.c; do
+            if ! grep -qi susfs "$f"; then
+              echo "::error::SUSFS callsites missing in $f"
+              exit 1
+            fi
+          done
+          git log --oneline -8
+      - name: Push integration commits
+        run: git push origin HEAD:Oplus-KSUN-SuSFS
