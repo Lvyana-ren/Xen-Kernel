@@ -46,6 +46,24 @@ jobs:
             exit 1
           fi
 
+      - name: Install pinned KernelSU Next + apply manual hooks and SUSFS bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          KSUN_REPO="https://github.com/Lvyana-ren/KernelSU-Next"
+          KSUN_SHA="465490a26667ba4cf00b3be975a7e28e53978829"
+          test ! -e KernelSU-Next
+          git clone "$KSUN_REPO" KernelSU-Next
+          git -C KernelSU-Next checkout --detach "$KSUN_SHA"
+          test "$(git -C KernelSU-Next rev-parse HEAD)" = "$KSUN_SHA"
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q 'kernelsu' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
+          grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          python3 scripts/apply-ksun-manual-hooks.py
+          python3 scripts/apply-ksun-susfs-compat.py "$PWD/KernelSU-Next"
+          git diff --check
+          echo "KSUN pinned SHA: $(git -C KernelSU-Next rev-parse HEAD)"
+
       - name: Install build dependencies
         shell: bash
         run: |
@@ -184,6 +202,14 @@ jobs:
           # Enable OPlus subsystem menu and selected vendor drivers
           scripts/config --file out/.config --enable OPLUS_FEATURES
 
+          # Enable KernelSU Next manual hooks + SUSFS v2.3.0
+          scripts/config --file out/.config --enable KSU --enable KSU_MANUAL_HOOK --enable KSU_SUSFS
+          scripts/config --file out/.config --enable KSU_SUSFS_SUS_PATH --enable KSU_SUSFS_SUS_MOUNT --enable KSU_SUSFS_SUS_KSTAT
+          scripts/config --file out/.config --enable KSU_SUSFS_TRY_UMOUNT --enable KSU_SUSFS_SPOOF_UNAME --enable KSU_SUSFS_ENABLE_LOG
+          scripts/config --file out/.config --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          scripts/config --file out/.config --enable KSU_SUSFS_OPEN_REDIRECT --enable KSU_SUSFS_SUS_MAP --disable KSU_SUSFS_SUS_MEMFD
+
+
           scripts/config --file out/.config \
             --set-str LOCALVERSION "-Xen+3" \
             --disable LOCALVERSION_AUTO \
@@ -195,6 +221,12 @@ jobs:
             --disable CC_OPTIMIZE_FOR_SIZE 
             
           "${KMAKE[@]}" olddefconfig
+
+          echo "===== KSUN / SUSFS final config ====="
+          grep -E '^(CONFIG_KSU|CONFIG_KSU_MANUAL_HOOK|CONFIG_KSU_SUSFS)' out/.config
+          for item in CONFIG_KSU=y CONFIG_KSU_MANUAL_HOOK=y CONFIG_KSU_SUSFS=y; do
+            grep -Fqx "$item" out/.config || { echo "::error::Missing $item"; exit 1; }
+          done
 
           echo "===== OxygenOS Android/vendor ABI configuration audit ====="
           required_config=(
