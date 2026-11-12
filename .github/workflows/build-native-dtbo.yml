@@ -67,9 +67,23 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -x "$HOME/clang/bin/clang" ] || [ ! -x "$HOME/clang/bin/ld.lld" ]; then
-            git clone --depth=1 --single-branch --branch 15.0 \
-              https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
-              "$HOME/clang"
+            rm -rf "$HOME/clang"
+            REPO="https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git"
+            for attempt in 1 2 3; do
+              echo "Clang download attempt $attempt/3"
+              rm -rf "$HOME/clang"
+              if git -c http.version=HTTP/1.1 clone --depth=1 --single-branch --branch 15.0 "$REPO" "$HOME/clang"; then
+                break
+              fi
+              rm -rf "$HOME/clang"
+              if [ "$attempt" -eq 3 ]; then
+                echo "::error::Clang clone failed after 3 attempts"
+                exit 1
+              fi
+              sleep 8
+            done
+            test -x "$HOME/clang/bin/clang"
+            test -x "$HOME/clang/bin/ld.lld"
             rm -rf "$HOME/clang/.git"
           fi
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
