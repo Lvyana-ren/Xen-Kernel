@@ -175,7 +175,7 @@ jobs:
             echo "Overlay target: vayu-sm8150-overlay.dtbo"
             echo "Donor DTB/DTBO files are not downloaded or used."
           } > artifacts/BUILD-INFO.txt
-          find artifacts -type f -exec ls -lh {} \\;
+          find artifacts -type f -print
 
       - name: Upload native Xen DTB/DTBO artifacts
         if: always()
