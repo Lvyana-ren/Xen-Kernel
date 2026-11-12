@@ -1,0 +1,185 @@
+name: Xen-Kernel - Native Vayu DTB/DTBO (OOS Audit)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_base_dtb:
+        description: "Build the vayu SM8150 base DTB"
+        required: true
+        type: boolean
+        default: true
+      build_overlay:
+        description: "Build the vayu SM8150 DT overlay and dtbo.img"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xen-native-dt-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-device-tree:
+    name: Build native Xen vayu device tree
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      KBUILD_BUILD_USER: Lvyana
+      KBUILD_BUILD_HOST: Xen-Kernel-DT
+
+    steps:
+      - name: Checkout selected source revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+          lfs: true
+
+      - name: Verify source revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          echo "Selected ref: $GITHUB_REF"
+          echo "Expected:     $GITHUB_SHA"
+          echo "Checked out:  $actual"
+          test "$actual" = "$GITHUB_SHA"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison build-essential flex git make python3 \
+            libssl-dev libelf-dev device-tree-compiler \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
+            zip xz-utils file
+
+      - name: Prepare Clang r547379
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -x "$HOME/clang/bin/clang" ] || [ ! -x "$HOME/clang/bin/ld.lld" ]; then
+            git clone --depth=1 --single-branch --branch 15.0 \
+              https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
+              "$HOME/clang"
+            rm -rf "$HOME/clang/.git"
+          fi
+          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+          "$HOME/clang/bin/clang" --version
+          "$HOME/clang/bin/ld.lld" --version
+
+      - name: Validate vayu device-tree targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f Makefile
+          test -f arch/arm64/boot/Makefile
+          test -f arch/arm64/boot/dts/qcom/Makefile
+          test -f arch/arm64/configs/vayu_oxygenos_defconfig
+          grep -q 'sm8150-xiaomi.dtb' arch/arm64/boot/dts/qcom/Makefile
+          grep -q 'vayu-sm8150-overlay.dtbo' arch/arm64/boot/dts/qcom/Makefile
+          grep -q 'CONFIG_BUILD_ARM64_DT_OVERLAY=y' arch/arm64/configs/vayu_oxygenos_defconfig
+          make kernelversion
+
+      - name: Configure OOS device-tree build
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          make ARCH=arm64 O=out \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+            HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1 vayu_oxygenos_defconfig
+          make ARCH=arm64 O=out \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf \
+            HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1 olddefconfig
+          cp out/.config native-dt.config
+          grep -E '^(CONFIG_(MACH_XIAOMI|MACH_XIAOMI_SM8150|MACH_XIAOMI_VAYU|BUILD_ARM64_DT_OVERLAY))=' out/.config || true
+
+      - name: Build base DTB
+        if: ${{ inputs.build_base_dtb }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          make -j"$(nproc)" ARCH=arm64 O=out \
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LLVM=1 LLVM_IAS=1 DTC_EXT=dtc sm8150-xiaomi.dtb
+          test -s out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb
+          mkdir -p artifacts/native-dtb
+          cp out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb artifacts/native-dtb/vayu-sm8150-base.dtb
+          dtc -I dtb -O dts -o artifacts/native-dtb/vayu-sm8150-base.dts \
+            out/arch/arm64/boot/dts/qcom/sm8150-xiaomi.dtb
+
+      - name: Build vayu overlay and packed DTBO
+        if: ${{ inputs.build_overlay }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          MAKE_ARGS=(ARCH=arm64 O=out CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm
+            HOSTCC=clang HOSTCXX=clang++ HOSTLD=ld.lld
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            LLVM=1 LLVM_IAS=1 DTC_EXT=dtc)
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" vayu-sm8150-overlay.dtbo
+          test -s out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo
+          make -j"$(nproc)" "${MAKE_ARGS[@]}" dtbo.img
+          test -s out/arch/arm64/boot/dtbo.img
+          mkdir -p artifacts/native-dtbo
+          cp out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo artifacts/native-dtbo/
+          cp out/arch/arm64/boot/dtbo.img artifacts/native-dtbo/
+          dtc -I dtb -O dts -o artifacts/native-dtbo/vayu-sm8150-overlay.dts \
+            out/arch/arm64/boot/dts/qcom/vayu-sm8150-overlay.dtbo
+          mkdtimg dump artifacts/native-dtbo/dtbo.img > artifacts/native-dtbo/dtbo-table.txt
+
+      - name: Collect audit metadata
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          [[ ! -f native-dt.config ]] || cp native-dt.config artifacts/kernel.config
+          git rev-parse HEAD > artifacts/source-commit.txt
+          git log -1 --oneline > artifacts/source-revision.txt
+          {
+            echo "Native Xen vayu DTB/DTBO audit build"
+            echo "Ref: $GITHUB_REF"
+            echo "Commit: $(git rev-parse HEAD)"
+            echo "Defconfig: vayu_oxygenos_defconfig"
+            echo "Base DTB target: sm8150-xiaomi.dtb"
+            echo "Overlay target: vayu-sm8150-overlay.dtbo"
+            echo "Donor DTB/DTBO files are not downloaded or used."
+          } > artifacts/BUILD-INFO.txt
+          find artifacts -type f -exec ls -lh {} \\\;
+
+      - name: Upload native Xen DTB/DTBO artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-OOS-Native-DTB-DTBO-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
