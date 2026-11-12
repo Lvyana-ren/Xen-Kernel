@@ -2,6 +2,9 @@ name: Xen-Kernel - OxygenOS Beta
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - Oplus-KSUN
 
 permissions:
   contents: read
