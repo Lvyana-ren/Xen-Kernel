@@ -1,0 +1,90 @@
+name: Integrate SUSFS callsites into Oplus-KSUN (direct)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/integrate-susfs-oplus-direct.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: xen-susfs-oplus-direct
+  cancel-in-progress: false
+
+jobs:
+  integrate:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: Oplus-KSUN
+          fetch-depth: 0
+      - name: Apply SUSFS series and preserve OPLUS/KSUN sys.c logic
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin 16-KSUN_SuSFS
+          commits=(3ad65e4df422 9b1311898b74 af216cf09e25 231b1cc02716 21a130d46861 f561231db295)
+          for sha in "${commits[@]}"; do git cherry-pick "$sha"; done
+
+          # Commit 7/9: accept its non-sys.c changes, then integrate both hooks manually.
+          git cherry-pick --no-commit 1c65f5765978 || true
+          if ! git diff --name-only --diff-filter=U | grep -q '^kernel/sys.c$'; then
+            echo "::error::Expected kernel/sys.c conflict was not produced; aborting safely."
+            git cherry-pick --abort || true
+            exit 1
+          fi
+          git checkout --ours kernel/sys.c
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("kernel/sys.c")
+          s = p.read_text()
+
+          # KSUN manual hook declaration and call (retain OPLUS implementation).
+          marker = "SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)"
+          decl = "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)\nextern int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid);\n#endif\n\n"
+          if "ksu_handle_setresuid(uid_t old_uid" not in s:
+              if marker not in s: raise SystemExit("setresuid anchor missing")
+              s = s.replace(marker, decl + marker, 1)
+          start = s.index(marker)
+          end = s.index("\n}\n", start)
+          fn = s[start:end]
+          call = "#if defined(CONFIG_KSU) && defined(CONFIG_KSU_MANUAL_HOOK)\n\t(void)ksu_handle_setresuid(current_uid().val, ruid);\n#endif\n"
+          if "ksu_handle_setresuid(current_uid().val, ruid)" not in fn:
+              anchor = "\treturn commit_creds(new);"
+              if anchor not in fn: raise SystemExit("setresuid commit_creds anchor missing")
+              fn = fn.replace(anchor, call + anchor, 1)
+              s = s[:start] + fn + s[end:]
+
+          # SUSFS spoof uname: insert alongside, not instead of, OPLUS fake uname.
+          uname = "SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)"
+          susfs_decl = "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\nextern void susfs_spoof_uname(struct new_utsname *tmp);\n#endif\n"
+          if "extern void susfs_spoof_uname" not in s:
+              if uname not in s: raise SystemExit("newuname anchor missing")
+              s = s.replace(uname, susfs_decl + uname, 1)
+          start = s.index(uname)
+          end = s.index("\n}\n", start)
+          fn = s[start:end]
+          susfs_call = "#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n\tsusfs_spoof_uname(&tmp);\n#endif\n"
+          if "susfs_spoof_uname(&tmp)" not in fn:
+              anchor = "\tup_read(&uts_sem);"
+              if anchor not in fn: raise SystemExit("newuname uts_sem anchor missing")
+              fn = fn.replace(anchor, susfs_call + anchor, 1)
+              s = s[:start] + fn + s[end:]
+          p.write_text(s)
+          PY
+          git add kernel/sys.c
+          git cherry-pick --continue
+          git cherry-pick ca651a5a2154
+          git diff --check
+          for f in fs/namei.c fs/readdir.c fs/namespace.c fs/proc_namespace.c fs/proc/fd.c fs/stat.c fs/statfs.c fs/open.c fs/proc/task_mmu.c mm/memory.c kernel/kallsyms.c security/selinux/avc.c; do
+            grep -qi susfs "$f" || { echo "::error::SUSFS marker missing: $f"; exit 1; }
+          done
+          echo "=== Integrated commits ==="
+          git log --oneline -9
+      - name: Push direct integration to Oplus-KSUN
+        run: git push origin HEAD:Oplus-KSUN
