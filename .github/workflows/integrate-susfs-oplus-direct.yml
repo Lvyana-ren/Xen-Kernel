@@ -77,8 +77,8 @@ jobs:
               s = s[:start] + fn + s[end:]
           p.write_text(s)
           PY
-          git add kernel/sys.c
-          git cherry-pick --continue
+          git add -A
+          git commit -m 'susfs: integrate v2.3.0 kernel call sites (7/9) with OPLUS sys.c preserved'
           git cherry-pick ca651a5a2154
           git diff --check
           for f in fs/namei.c fs/readdir.c fs/namespace.c fs/proc_namespace.c fs/proc/fd.c fs/stat.c fs/statfs.c fs/open.c fs/proc/task_mmu.c mm/memory.c kernel/kallsyms.c security/selinux/avc.c; do
