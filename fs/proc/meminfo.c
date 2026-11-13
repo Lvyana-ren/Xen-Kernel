@@ -30,7 +30,7 @@ static void show_val_kb(struct seq_file *m, const char *s, unsigned long num)
 	static const char blanks[7] = {' ', ' ', ' ', ' ',' ', ' ', ' '};
 	int len;
 
-	len = num_to_str(v, sizeof(v), num << (PAGE_SHIFT - 10));
+	len = num_to_str(v, sizeof(v), num << (PAGE_SHIFT - 10), 0);
 
 	seq_write(m, s, 16);
 
