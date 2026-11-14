@@ -100,6 +100,13 @@ jobs:
           test -f drivers/kernelsu/Makefile
           grep -qF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           grep -qE '^obj-\$\(CONFIG_KSU\)[[:space:]]*\+= kernelsu/' drivers/Makefile
+          # RKSU Legacy hook mode must be selected from the symbols actually
+          # exported by the pinned legacy source, not inferred from Manager branding.
+          echo "RKSU upstream hook choices are reported above; fail unless a non-GKI path exists."
+          if grep -qE 'depends on KPROBES|depends on GKI|depends on CONFIG_KPROBES' drivers/kernelsu/Kconfig; then
+            echo "::error::This RKSU Kconfig still gates the backend on KPROBES/GKI; implement a reviewed non-GKI manual-hook port first."
+            exit 1
+          fi
           git diff --check
 
       - name: Configure Xen + RKSU Legacy + ThinLTO
