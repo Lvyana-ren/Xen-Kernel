@@ -8,6 +8,27 @@ git -C KernelSU fetch --depth=1 origin "$KOWSU_REF"
 git -C KernelSU checkout --detach FETCH_HEAD
 echo "KowSU commit: $(git -C KernelSU rev-parse HEAD)"
 
+# Linux 4.14 seccomp compatibility: native syscall count macro is named NR_syscalls.
+python3 - <<'PY'
+from pathlib import Path
+p = Path("KernelSU/kernel/infra/seccomp_cache.c")
+s = p.read_text()
+if "SECCOMP_ARCH_NATIVE_NR" not in s:
+    raise SystemExit("KowSU seccomp_cache.c unexpectedly lacks SECCOMP_ARCH_NATIVE_NR")
+if "#ifndef SECCOMP_ARCH_NATIVE_NR" not in s:
+    marker = '#include <linux/seccomp.h>\n'
+    if marker not in s:
+        raise SystemExit("KowSU seccomp_cache.c include anchor not found")
+    compat = marker + '''#include <asm/unistd.h>
+#ifndef SECCOMP_ARCH_NATIVE_NR
+#define SECCOMP_ARCH_NATIVE_NR NR_syscalls
+#endif
+'''
+    s = s.replace(marker, compat, 1)
+p.write_text(s)
+PY
+
+
 # Linux 4.14 file_operations compatibility: guard members absent from old kernels.
 python3 - <<'PY'
 from pathlib import Path
