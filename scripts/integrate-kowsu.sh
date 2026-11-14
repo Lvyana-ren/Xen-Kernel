@@ -237,3 +237,16 @@ wrapped = """#include <linux/version.h>
 """ + src + fallback
 p.write_text(wrapped)
 PY
+
+# Linux 4.14 policydb structures differ substantially from modern KowSU.
+# The 4.14 rules gate above does not call sepolicy.c; omit its incompatible object.
+python3 - <<'PY'
+from pathlib import Path
+p = Path("KernelSU/kernel/Kbuild")
+s = p.read_text()
+line = "kernelsu-objs += selinux/sepolicy.o"
+if line not in s:
+    raise SystemExit("KowSU Kbuild sepolicy object anchor not found")
+p.write_text(s.replace(line + "\\n", "", 1))
+PY
+
