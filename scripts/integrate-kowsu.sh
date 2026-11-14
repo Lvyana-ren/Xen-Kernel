@@ -145,6 +145,19 @@ s = s.replace("#else\n    p->ops.mmap_supported_flags = fp->f_op->mmap_supported
 p.write_text(s)
 PY
 
+# Linux 4.14 seccomp struct compatibility: filter_count was added in Linux 5.9.
+python3 - <<'PY'
+from pathlib import Path
+p = Path("KernelSU/kernel/policy/app_profile.c")
+s = p.read_text()
+old = "    atomic_set(&current->seccomp.filter_count, 0);"
+new = """#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 9, 0)
+    atomic_set(&current->seccomp.filter_count, 0);
+#endif"""
+if old not in s:
+    raise SystemExit("KowSU seccomp filter_count compatibility anchor not found")
+p.write_text(s.replace(old, new, 1))
+PY
 # Linux 4.14 arm64 compatibility: upstream syscall_hook.h omits arm64 typedef.
 python3 - <<'PY'
 from pathlib import Path
