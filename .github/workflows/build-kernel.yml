@@ -86,20 +86,14 @@ jobs:
               src.write_text(text.replace(anchor, anchor + "\\n#include <linux/cpu.h>", 1))
           PY
 
-      - name: Ensure ZRAM default compressor is LZ4
+      - name: Verify ZRAM default compressor
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          p = Path("drivers/block/zram/zram_drv.c")
-          s = p.read_text()
-          m = re.search(r'(?m)^\\s*static const char \\*default_compressor\\s*=\\s*"([^"]+)"\\s*;', s)
-          if not m:
-              raise SystemExit("Could not safely locate default_compressor")
-          if m.group(1) != "lz4":
-              p.write_text(s[:m.start(1)] + "lz4" + s[m.end(1):])
-          PY
+          grep -Fq 'static const char *default_compressor = "lz4";' drivers/block/zram/zram_drv.c || {
+            echo "::error::ZRAM default compressor is not LZ4"
+            exit 1
+          }
+          echo "ZRAM default compressor verified: LZ4"
 
       - name: Integrate pinned KowSU source
         env:
