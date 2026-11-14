@@ -210,7 +210,14 @@ jobs:
           echo "===== Effective LTO / optimization / governor configuration ====="
           grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ|CPU_FREQ_GOV_SCHEDUTIL|CPU_FREQ_DEFAULT_GOV))=|^# CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_GOV_SCHEDUTIL) is not set' out/.config || true
 
-          if ! grep -q '^CONFIG_KPROBES=y
+          if ! grep -q '^CONFIG_KPROBES=y$' out/.config ||
+             ! grep -q '^CONFIG_KSU=y$' out/.config; then
+            echo "::error::KowSU requires CONFIG_KPROBES and CONFIG_KSU."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_LTO=y$' out/.config ||
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
              ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
              grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
             echo "::error::LTO/ThinLTO did not survive olddefconfig."
