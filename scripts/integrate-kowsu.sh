@@ -8,6 +8,28 @@ git -C KernelSU fetch --depth=1 origin "$KOWSU_REF"
 git -C KernelSU checkout --detach FETCH_HEAD
 echo "KowSU commit: $(git -C KernelSU rev-parse HEAD)"
 
+# Linux 4.14 file_operations compatibility: omit API members absent from old kernels.
+python3 - <<'PY'
+from pathlib import Path
+p = Path("KernelSU/kernel/infra/file_wrapper.c")
+s = p.read_text()
+
+# iopoll is not part of Linux 4.14 file_operations.
+start = s.index("#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)\\nstatic int ksu_wrapper_iopoll")
+end = s.index("#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)\\nstatic int ksu_wrapper_iterate", start)
+s = s[:start] + "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)\\n" + s[start:end] + "#endif\\n\\n" + s[end:]
+
+# Newer file_operations members: remap_file_range, fadvise and mmap_supported_flags.
+start = s.index("// no REMAP_FILE_DEDUP")
+end = s.index("static void ksu_release_file_wrapper", start)
+s = s[:start] + "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\\n" + s[start:end] + "#endif\\n\\n" + s[end:]
+
+s = s.replace("    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;", "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)\\n    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\\n#endif")
+s = s.replace("#else\\n    p->ops.mmap_supported_flags = fp->f_op->mmap_supported_flags;\\n#endif", "#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\\n    p->ops.mmap_supported_flags = fp->f_op->mmap_supported_flags;\\n#endif")
+s = s.replace("    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\\n    p->ops.fadvise = fp->f_op->fadvise ? ksu_wrapper_fadvise : NULL;", "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\\n    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\\n    p->ops.fadvise = fp->f_op->fadvise ? ksu_wrapper_fadvise : NULL;\\n#endif")
+p.write_text(s)
+PY
+
 # Linux 4.14 arm64 compatibility: upstream syscall_hook.h omits arm64 typedef.
 python3 - <<'PY'
 from pathlib import Path
