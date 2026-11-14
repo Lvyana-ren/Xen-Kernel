@@ -8,25 +8,41 @@ git -C KernelSU fetch --depth=1 origin "$KOWSU_REF"
 git -C KernelSU checkout --detach FETCH_HEAD
 echo "KowSU commit: $(git -C KernelSU rev-parse HEAD)"
 
-# Linux 4.14 file_operations compatibility: omit API members absent from old kernels.
+# Linux 4.14 file_operations compatibility: guard members absent from old kernels.
 python3 - <<'PY'
 from pathlib import Path
+import re
+
 p = Path("KernelSU/kernel/infra/file_wrapper.c")
 s = p.read_text()
 
-# iopoll is not part of Linux 4.14 file_operations.
-start = s.index("#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)\\nstatic int ksu_wrapper_iopoll")
-end = s.index("#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)\\nstatic int ksu_wrapper_iterate", start)
-s = s[:start] + "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)\\n" + s[start:end] + "#endif\\n\\n" + s[end:]
+# iopoll exists only in newer kernels; wrap its declaration variants and assignment.
+pattern = r'(#if LINUX_VERSION_CODE >= KERNEL_VERSION\(6, 1, 0\)\nstatic int ksu_wrapper_iopoll.*?#endif\n)'
+m = re.search(pattern, s, re.S)
+if not m:
+    raise SystemExit("KowSU patch: iopoll declaration block not found (source mismatch)")
+s = s[:m.start()] + "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)\n" + m.group(1) + "#endif\n" + s[m.end():]
 
-# Newer file_operations members: remap_file_range, fadvise and mmap_supported_flags.
-start = s.index("// no REMAP_FILE_DEDUP")
-end = s.index("static void ksu_release_file_wrapper", start)
-s = s[:start] + "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\\n" + s[start:end] + "#endif\\n\\n" + s[end:]
+pattern = r'(    p->ops\.iopoll = fp->f_op->iopoll \? ksu_wrapper_iopoll : NULL;)'
+s, n = re.subn(pattern, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)\n\\1\n#endif", s, count=1)
+if n != 1:
+    raise SystemExit("KowSU patch: iopoll assignment not found")
 
-s = s.replace("    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;", "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)\\n    p->ops.iopoll = fp->f_op->iopoll ? ksu_wrapper_iopoll : NULL;\\n#endif")
-s = s.replace("#else\\n    p->ops.mmap_supported_flags = fp->f_op->mmap_supported_flags;\\n#endif", "#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\\n    p->ops.mmap_supported_flags = fp->f_op->mmap_supported_flags;\\n#endif")
-s = s.replace("    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\\n    p->ops.fadvise = fp->f_op->fadvise ? ksu_wrapper_fadvise : NULL;", "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\\n    p->ops.remap_file_range = fp->f_op->remap_file_range ? ksu_wrapper_remap_file_range : NULL;\\n    p->ops.fadvise = fp->f_op->fadvise ? ksu_wrapper_fadvise : NULL;\\n#endif")
+# remap_file_range and fadvise are absent from Linux 4.14 file_operations.
+pattern = r'(// no REMAP_FILE_DEDUP.*?static int ksu_wrapper_fadvise\(.*?\n\})'
+m = re.search(pattern, s, re.S)
+if not m:
+    raise SystemExit("KowSU patch: remap/fadvise block not found (source mismatch)")
+s = s[:m.start()] + "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\n" + m.group(1) + "\n#endif\n" + s[m.end():]
+
+pattern = r'(    p->ops\.remap_file_range = .*?\n    p->ops\.fadvise = .*?;)'
+s, n = re.subn(pattern, "#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\n\\1\n#endif", s, count=1)
+if n != 1:
+    raise SystemExit("KowSU patch: remap/fadvise assignments not found")
+
+# mmap_supported_flags was added after Linux 4.14; fop_flags is newer still.
+s = s.replace("#else\n    p->ops.mmap_supported_flags = fp->f_op->mmap_supported_flags;\n#endif",
+              "#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\n    p->ops.mmap_supported_flags = fp->f_op->mmap_supported_flags;\n#endif")
 p.write_text(s)
 PY
 
