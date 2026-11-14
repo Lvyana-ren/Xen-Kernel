@@ -24,7 +24,7 @@ jobs:
       KBUILD_BUILD_HOST: Xen-Kernel
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 2G
-      CCACHE_COMPILERCHECK: "%compiler% --version
+      CCACHE_COMPILERCHECK: "%compiler% --version"
 
     steps:
       - name: Checkout Xen-Kernel KowSU branch
