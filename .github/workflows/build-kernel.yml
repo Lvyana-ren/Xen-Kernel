@@ -1,4 +1,4 @@
-name: Xen-Kernel - RKSU Legacy Integration
+name: Xen-Kernel - KowSU Integration
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: xen-rksu-legacy-${{ github.ref }}
+  group: xen-kowsu-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -91,7 +91,7 @@ jobs:
           set -euo pipefail
           grep -Fq 'static const char *default_compressor = "lz4";' drivers/block/zram/zram_drv.c
 
-      - name: Integrate RKSU Legacy v3.2.2-10
+      - name: Integrate KowSU upstream (pinned commit)
         run: |
           set -euo pipefail
           bash scripts/integrate-rksu-legacy.sh
@@ -102,14 +102,14 @@ jobs:
           grep -qE '^obj-\$\(CONFIG_KSU\)[[:space:]]*\+= kernelsu/' drivers/Makefile
           # RKSU Legacy hook mode must be selected from the symbols actually
           # exported by the pinned legacy source, not inferred from Manager branding.
-          echo "RKSU upstream hook choices are reported above; fail unless a non-GKI path exists."
+          echo "KowSU requires KPROBES on this legacy kernel; verify that it is enabled."
           if grep -qE 'depends on KPROBES|depends on GKI|depends on CONFIG_KPROBES' drivers/kernelsu/Kconfig; then
-            echo "::error::This RKSU Kconfig still gates the backend on KPROBES/GKI; implement a reviewed non-GKI manual-hook port first."
+            echo "::error::KowSU Kconfig requires KPROBES; this is expected for its hook backend."
             exit 1
           fi
           git diff --check
 
-      - name: Configure Xen + RKSU Legacy + ThinLTO
+      - name: Configure Xen + KowSU + KPROBES + ThinLTO
         run: |
           set -euo pipefail
           export PATH="$HOME/clang/bin:$PATH"
@@ -120,13 +120,13 @@ jobs:
           # Enable root backend only after upstream legacy Kconfig is loaded.
           scripts/config --file out/.config \
             --set-str LOCALVERSION "-Xen-RKSU+1" --disable LOCALVERSION_AUTO \
-            --enable KSU \
+            --enable KSU --enable KPROBES --enable KRETPROBES \
             --enable LTO --enable LTO_CLANG --enable THINLTO --disable LTO_NONE \
             --enable CC_OPTIMIZE_FOR_PERFORMANCE --disable CC_OPTIMIZE_FOR_SIZE
 
           "${KMAKE[@]}" olddefconfig
 
-          grep -q '^CONFIG_KSU=y$' out/.config || {
+          grep -q '^CONFIG_KPROBES=y
             echo "::error::CONFIG_KSU did not survive olddefconfig; inspect RKSU Kconfig prerequisites"
             exit 1
           }
@@ -134,7 +134,7 @@ jobs:
           grep -q '^CONFIG_LTO_CLANG=y$' out/.config
           grep -q '^CONFIG_THINLTO=y$' out/.config
           ! grep -q '^CONFIG_LTO_NONE=y$' out/.config
-          cp out/.config xen-rksu.config
+          cp out/.config xen-kowsu.config
           "${KMAKE[@]}" kernelrelease
 
       - name: Build kernel Image
@@ -162,14 +162,108 @@ jobs:
           cp out/arch/arm64/boot/Image artifacts/ 2>/dev/null || true
           cp out/include/config/kernel.release artifacts/kernel-release.txt 2>/dev/null || true
           git rev-parse HEAD > artifacts/xen-commit.txt 2>/dev/null || true
-          git -C KernelSU rev-parse HEAD > artifacts/rksu-commit.txt 2>/dev/null || true
+          git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt 2>/dev/null || true
           clang --version > artifacts/clang-version.txt 2>&1 || true
 
-      - name: Upload RKSU build artifacts
+      - name: Upload KowSU build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-RKSU-Legacy
+          name: Xen-Kernel-KowSU
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config || { echo '::error::KPROBES is required by KowSU'; exit 1; }\n          grep -q '^CONFIG_KSU=y
+            echo "::error::CONFIG_KSU did not survive olddefconfig; inspect RKSU Kconfig prerequisites"
+            exit 1
+          }
+          grep -q '^CONFIG_LTO=y$' out/.config
+          grep -q '^CONFIG_LTO_CLANG=y$' out/.config
+          grep -q '^CONFIG_THINLTO=y$' out/.config
+          ! grep -q '^CONFIG_LTO_NONE=y$' out/.config
+          cp out/.config xen-kowsu.config
+          "${KMAKE[@]}" kernelrelease
+
+      - name: Build kernel Image
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          make -j"$(nproc)" O=out ARCH=arm64 SUBARCH=arm64 \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++ \
+            HOSTAR=llvm-ar HOSTLD=ld.lld LLVM=1 LLVM_IAS=1 CC="ccache clang" Image 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          test "$status" -eq 0
+          test -s out/arch/arm64/boot/Image
+          cat out/include/config/kernel.release
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p artifacts
+          cp build.log artifacts/ 2>/dev/null || true
+          cp xen-rksu.config artifacts/ 2>/dev/null || true
+          cp out/.config artifacts/kernel.config 2>/dev/null || true
+          cp out/arch/arm64/boot/Image artifacts/ 2>/dev/null || true
+          cp out/include/config/kernel.release artifacts/kernel-release.txt 2>/dev/null || true
+          git rev-parse HEAD > artifacts/xen-commit.txt 2>/dev/null || true
+          git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+
+      - name: Upload KowSU build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KowSU
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config || {
+            echo "::error::CONFIG_KSU did not survive olddefconfig; inspect RKSU Kconfig prerequisites"
+            exit 1
+          }
+          grep -q '^CONFIG_LTO=y$' out/.config
+          grep -q '^CONFIG_LTO_CLANG=y$' out/.config
+          grep -q '^CONFIG_THINLTO=y$' out/.config
+          ! grep -q '^CONFIG_LTO_NONE=y$' out/.config
+          cp out/.config xen-kowsu.config
+          "${KMAKE[@]}" kernelrelease
+
+      - name: Build kernel Image
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          make -j"$(nproc)" O=out ARCH=arm64 SUBARCH=arm64 \
+            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++ \
+            HOSTAR=llvm-ar HOSTLD=ld.lld LLVM=1 LLVM_IAS=1 CC="ccache clang" Image 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          test "$status" -eq 0
+          test -s out/arch/arm64/boot/Image
+          cat out/include/config/kernel.release
+
+      - name: Collect artifacts
+        if: always()
+        run: |
+          mkdir -p artifacts
+          cp build.log artifacts/ 2>/dev/null || true
+          cp xen-rksu.config artifacts/ 2>/dev/null || true
+          cp out/.config artifacts/kernel.config 2>/dev/null || true
+          cp out/arch/arm64/boot/Image artifacts/ 2>/dev/null || true
+          cp out/include/config/kernel.release artifacts/kernel-release.txt 2>/dev/null || true
+          git rev-parse HEAD > artifacts/xen-commit.txt 2>/dev/null || true
+          git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+
+      - name: Upload KowSU build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KowSU
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
