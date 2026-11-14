@@ -54,6 +54,7 @@ jobs:
           path: .ccache
           key: ${{ runner.os }}-xen-kowsu-ccache-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            ${{ runner.os }}-xen-kowsu-ccache-
             ${{ runner.os }}-xen-default-ccache-
 
       - name: Prepare baseline Clang r547379
@@ -210,7 +211,2273 @@ jobs:
           grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ|CPU_FREQ_GOV_SCHEDUTIL|CPU_FREQ_DEFAULT_GOV))=|^# CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_GOV_SCHEDUTIL) is not set' out/.config || true
 
           if ! grep -q '^CONFIG_KPROBES=y
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-kowsu.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          if [[ -d KernelSU/.git ]]; then git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt; git -C KernelSU diff --stat > artifacts/kowsu-source-diffstat.txt; fi
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KowSU
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config || ! grep -q '^CONFIG_KSU=y
              ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config; then
+            echo "::error::KowSU requires CONFIG_KPROBES and CONFIG_KSU."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_LTO=y
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config ||
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config ||
+             ! grep -q '^CONFIG_KSU=y
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-kowsu.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          if [[ -d KernelSU/.git ]]; then git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt; git -C KernelSU diff --stat > artifacts/kowsu-source-diffstat.txt; fi
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KowSU
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config || ! grep -q '^CONFIG_KSU=y
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config; then
+            echo "::error::KowSU requires CONFIG_KPROBES and CONFIG_KSU."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_LTO=y
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config ||
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config; then
+            echo "::error::KowSU requires CONFIG_KPROBES and CONFIG_KSU."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_LTO=y
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-kowsu.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          if [[ -d KernelSU/.git ]]; then git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt; git -C KernelSU diff --stat > artifacts/kowsu-source-diffstat.txt; fi
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KowSU
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config || ! grep -q '^CONFIG_KSU=y
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config; then
+            echo "::error::KowSU requires CONFIG_KPROBES and CONFIG_KSU."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_LTO=y
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config ||
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config ||
+             ! grep -q '^CONFIG_LTO_CLANG=y
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-kowsu.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          if [[ -d KernelSU/.git ]]; then git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt; git -C KernelSU diff --stat > artifacts/kowsu-source-diffstat.txt; fi
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-KowSU
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config || ! grep -q '^CONFIG_KSU=y
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config; then
+            echo "::error::KowSU requires CONFIG_KPROBES and CONFIG_KSU."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_LTO=y
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config ||
+             ! grep -q '^CONFIG_LTO_CLANG=y$' out/.config ||
+             ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
+             grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
+            echo "::error::LTO/ThinLTO did not survive olddefconfig."
+            exit 1
+          fi
+
+          if ! grep -q '^CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y$' out/.config ||
+             grep -q '^CONFIG_CC_OPTIMIZE_FOR_SIZE=y$'; then
+            echo "::error::-O2 performance optimization is not selected in final .config."
+            exit 1
+          fi
+
+          
+          cp out/.config xen-default.config
+          echo "===== Kernel release ====="
+          "${KMAKE[@]}" kernelrelease
+
+      # Buang tag -openela dari versi kernel
+      - name: Strip -openela from kernel version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Sebelum:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          sed -i -E 's/^EXTRAVERSION[[:space:]]*=.*/EXTRAVERSION =/' Makefile
+
+          echo "Sesudah:"
+          grep -n '^EXTRAVERSION' Makefile
+
+          if make kernelversion | grep -q openela; then
+            echo "::error::Tag openela masih ada."
+            exit 1
+          fi
+
+          make kernelversion
+
+      - name: Compile Xen-Kernel Image
+        shell: bash
+        run: |
+          set -uo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+          set +e
+          make -j"$(nproc)" \
+            O=out \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
+            DTC_EXT=dtc \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            STRIP=llvm-strip \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            READELF=llvm-readelf \
+            HOSTCC=clang \
+            HOSTCXX=clang++ \
+            HOSTAR=llvm-ar \
+            HOSTLD=ld.lld \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CC="ccache clang" \
+            Image 2>&1 | tee build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
+          set -e
+          ccache -s || true
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "===== First compiler/linker errors ====="
+            grep -n -m 30 -E 'error:|undefined (symbol|reference)|ld.lld: error|Error [0-9]+$' build.log || true
+            exit "$BUILD_STATUS"
+          fi
+
+          IMAGE="out/arch/arm64/boot/Image"
+          if [ ! -s "$IMAGE" ]; then
+            echo "::error::Kernel Image is missing or empty."
+            exit 1
+          fi
+          echo "===== Kernel Image ====="
+          file "$IMAGE"
+          ls -lh "$IMAGE"
+          echo "===== Kernel release ====="
+          cat out/include/config/kernel.release
+
+          echo "===== LTO config embedded in Image ====="
+          if [ -x scripts/extract-ikconfig ]; then
+            scripts/extract-ikconfig "$IMAGE" 2>/dev/null \
+              | grep -E '^(CONFIG_(LTO|LTO_CLANG|THINLTO|LTO_NONE|CC_OPTIMIZE_FOR_PERFORMANCE|CC_OPTIMIZE_FOR_SIZE|CPU_FREQ_DEFAULT_GOV_SCHEDUTIL)=|# CONFIG_LTO_CLANG is not set)' \
+              || echo "Embedded config not readable."
+          fi
+          echo "===== ThinLTO-related symbols ====="
+          grep -c '\.llvm\.' out/System.map || true
+          echo "===== ZRAM source default ====="
+          grep -n 'default_compressor' drivers/block/zram/zram_drv.c
+
+      - name: Collect diagnostics and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p artifacts
+          [[ ! -f build.log ]] || cp build.log artifacts/
+          [[ ! -f xen-default.config ]] || cp xen-default.config artifacts/
+          [[ ! -f out/.config ]] || cp out/.config artifacts/kernel.config
+          [[ -s out/arch/arm64/boot/Image ]] || true
+          if [[ -s out/arch/arm64/boot/Image ]]; then
+            cp out/arch/arm64/boot/Image artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/Image.gz ]]; then
+            cp out/arch/arm64/boot/Image.gz artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtbo.img ]]; then
+            cp out/arch/arm64/boot/dtbo.img artifacts/
+          fi
+          if [[ -s out/arch/arm64/boot/dtb.img ]]; then
+            cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -f out/include/config/kernel.release ]]; then
+            cp out/include/config/kernel.release artifacts/kernel-release.txt
+          fi
+          git rev-parse HEAD > artifacts/source-commit.txt 2>/dev/null || true
+          clang --version > artifacts/clang-version.txt 2>&1 || true
+          ccache -s > artifacts/ccache-stats.txt 2>&1 || true
+          git diff -- drivers/soc/qcom/hyp_core_ctl.c drivers/block/zram/zram_drv.c > artifacts/workflow-source-patches.diff 2>/dev/null || true
+          find artifacts -type f -exec ls -lh '{}' \;
+
+      - name: Upload Xen-Kernel Default artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-Kernel-Default
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+ out/.config ||
              ! grep -q '^CONFIG_THINLTO=y$' out/.config ||
              grep -q '^CONFIG_LTO_NONE=y$' out/.config; then
             echo "::error::LTO/ThinLTO did not survive olddefconfig."
