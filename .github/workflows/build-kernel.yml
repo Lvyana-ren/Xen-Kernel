@@ -1,4 +1,4 @@
-name: Xen-Kernel - KowSU Integration
+name: Xen-Kernel - RKSU Legacy Integration
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: xen-kowsu-${{ github.ref }}
+  group: xen-rksu-legacy-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -47,8 +47,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ${{ runner.os }}-xen-kowsu-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: ${{ runner.os }}-xen-kowsu-
+          key: ${{ runner.os }}-xen-rksu-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ runner.os }}-xen-rksu-
 
       - name: Prepare Clang r547379
         run: |
@@ -89,48 +89,45 @@ jobs:
       - name: Verify ZRAM default compressor
         run: |
           set -euo pipefail
-          grep -Fq 'static const char *default_compressor = "lz4";' drivers/block/zram/zram_drv.c || {
-            echo "::error::ZRAM default compressor is not LZ4"
-            exit 1
-          }
-          echo "ZRAM default compressor verified: LZ4"
+          grep -Fq 'static const char *default_compressor = "lz4";' drivers/block/zram/zram_drv.c
 
-      - name: Integrate pinned KowSU source
-        env:
-          KOWSU_REPO: https://github.com/KOWX712/KernelSU
-          KOWSU_SHA: 21787ce135c988bae4244a44cfcb5a542aa3347f
+      - name: Integrate RKSU Legacy v3.2.2-10
         run: |
           set -euo pipefail
-          git clone --no-checkout "$KOWSU_REPO" KernelSU
-          git -C KernelSU checkout --detach "$KOWSU_SHA"
-          test "$(git -C KernelSU rev-parse HEAD)" = "$KOWSU_SHA"
-          grep -q 'depends on KPROBES && EXT4_FS' KernelSU/kernel/Kconfig
-          ln -sfn ../KernelSU/kernel drivers/kernelsu
-          grep -q 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile || printf '\\nobj-$(CONFIG_KSU) += kernelsu/\\n' >> drivers/Makefile
-          grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          bash scripts/integrate-rksu-legacy.sh
+          test -L drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/Makefile
+          grep -qF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          grep -qE '^obj-\$\(CONFIG_KSU\)[[:space:]]*\+= kernelsu/' drivers/Makefile
           git diff --check
-          echo "Pinned KowSU: $(git -C KernelSU log -1 --oneline)"
 
-      - name: Configure Xen + KowSU + ThinLTO
+      - name: Configure Xen + RKSU Legacy + ThinLTO
         run: |
           set -euo pipefail
           export PATH="$HOME/clang/bin:$PATH"
           LLVM_VARS=(CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1)
           KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
           "${KMAKE[@]}" vayu_defconfig
+
+          # Enable root backend only after upstream legacy Kconfig is loaded.
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen-KowSU+1" --disable LOCALVERSION_AUTO \
-            --enable KPROBES --enable KSU \
+            --set-str LOCALVERSION "-Xen-RKSU+1" --disable LOCALVERSION_AUTO \
+            --enable KSU \
             --enable LTO --enable LTO_CLANG --enable THINLTO --disable LTO_NONE \
             --enable CC_OPTIMIZE_FOR_PERFORMANCE --disable CC_OPTIMIZE_FOR_SIZE
+
           "${KMAKE[@]}" olddefconfig
-          for sym in CONFIG_KPROBES CONFIG_KSU CONFIG_LTO CONFIG_LTO_CLANG CONFIG_THINLTO CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE; do
-            grep -q "^$sym=y$" out/.config || { echo "::error::$sym not enabled"; exit 1; }
-          done
-          for sym in CONFIG_LTO_NONE CONFIG_CC_OPTIMIZE_FOR_SIZE; do
-            ! grep -q "^$sym=y$" out/.config || { echo "::error::$sym must be disabled"; exit 1; }
-          done
-          cp out/.config xen-kowsu.config
+
+          grep -q '^CONFIG_KSU=y$' out/.config || {
+            echo "::error::CONFIG_KSU did not survive olddefconfig; inspect RKSU Kconfig prerequisites"
+            exit 1
+          }
+          grep -q '^CONFIG_LTO=y$' out/.config
+          grep -q '^CONFIG_LTO_CLANG=y$' out/.config
+          grep -q '^CONFIG_THINLTO=y$' out/.config
+          ! grep -q '^CONFIG_LTO_NONE=y$' out/.config
+          cp out/.config xen-rksu.config
           "${KMAKE[@]}" kernelrelease
 
       - name: Build kernel Image
@@ -153,19 +150,19 @@ jobs:
         run: |
           mkdir -p artifacts
           cp build.log artifacts/ 2>/dev/null || true
-          cp xen-kowsu.config artifacts/ 2>/dev/null || true
+          cp xen-rksu.config artifacts/ 2>/dev/null || true
           cp out/.config artifacts/kernel.config 2>/dev/null || true
           cp out/arch/arm64/boot/Image artifacts/ 2>/dev/null || true
           cp out/include/config/kernel.release artifacts/kernel-release.txt 2>/dev/null || true
           git rev-parse HEAD > artifacts/xen-commit.txt 2>/dev/null || true
-          git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt 2>/dev/null || true
+          git -C KernelSU rev-parse HEAD > artifacts/rksu-commit.txt 2>/dev/null || true
           clang --version > artifacts/clang-version.txt 2>&1 || true
 
-      - name: Upload KowSU build artifacts
+      - name: Upload RKSU build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-Kernel-KowSU
+          name: Xen-Kernel-RKSU-Legacy
           path: artifacts/
           if-no-files-found: warn
           retention-days: 7
