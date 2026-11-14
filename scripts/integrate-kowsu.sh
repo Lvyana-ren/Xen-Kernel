@@ -22,7 +22,8 @@ if "defined(__aarch64__)" not in s:
 # Linux 4.14 exports architecture page-table headers as asm/pgtable.h.
 p = Path("KernelSU/kernel/feature/sucompat.c")
 s = p.read_text()
-s = s.replace("#include <linux/pgtable.h>", """#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+s = s.replace("#include <linux/pgtable.h>", """#include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
 #include <linux/pgtable.h>
 #else
 #include <asm/pgtable.h>
