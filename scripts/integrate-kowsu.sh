@@ -207,3 +207,37 @@ ln -sfn ../KernelSU/kernel drivers/kernelsu
 grep -qE '^obj-\$\(CONFIG_KSU\)[[:space:]]*\+= kernelsu/' drivers/Makefile || printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
 grep -qF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 git diff --check
+
+# Temporary Linux 4.14 SELinux API compatibility gate.
+# Modern KowSU policy replacement depends on selinux_state.policy (>=5.x).
+# Keep legacy kernel buildable while a native policydb transaction port is developed.
+python3 - <<'PY'
+from pathlib import Path
+p = Path("KernelSU/kernel/selinux/rules.c")
+s = p.read_text()
+if "XEN_KOWSU_SELINUX_414_GATE" in s:
+    raise SystemExit("SELinux 4.14 gate already applied")
+fallback = r"""
+#else /* XEN_KOWSU_SELINUX_414_GATE */
+#include <linux/errno.h>
+#include <linux/types.h>
+struct selinux_policy;
+struct selinux_policy *backup_sepolicy;
+void apply_kernelsu_rules(void)
+{
+    pr_warn("KowSU SELinux rules: Linux 4.14 policydb port pending; built-in rules skipped\\n");
+}
+int handle_sepolicy(void __user *user_data, u64 data_len)
+{
+    return -EOPNOTSUPP;
+}
+#endif /* XEN_KOWSU_SELINUX_414_GATE */
+"""
+s = "#define XEN_KOWSU_SELINUX_414_GATE\\n" + s
+# use the version gate before any modern-only declarations/functions
+s = s.replace("#include \\"linux/rcupdate.h\\"",
+              "#include <linux/version.h>\\n#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 0, 0)\\n#include \\"linux/rcupdate.h\\", 1)
+# The fallback is deliberately compile-only and fails closed for runtime sepolicy batches.
+s += fallback
+p.write_text(s)
+PY
