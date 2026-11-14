@@ -19,6 +19,16 @@ if "defined(__aarch64__)" not in s:
     if needle not in s: raise SystemExit("No syscall_fn_t insertion anchor; abort")
     p.write_text(s.replace(needle, replacement, 1))
 
+# Linux 4.14 exports architecture page-table headers as asm/pgtable.h.
+p = Path("KernelSU/kernel/feature/sucompat.c")
+s = p.read_text()
+s = s.replace("#include <linux/pgtable.h>", """#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+#include <linux/pgtable.h>
+#else
+#include <asm/pgtable.h>
+#endif""")
+p.write_text(s)
+
 # MODULE_IMPORT_NS was introduced after Linux 4.14; avoid unsupported macro.
 p = Path("KernelSU/kernel/core/init.c")
 s = p.read_text()
