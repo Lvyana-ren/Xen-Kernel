@@ -47,8 +47,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ccache
-          key: ${{ runner.os }}-xen-rksu-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: ${{ runner.os }}-xen-rksu-
+          key: ${{ runner.os }}-xen-kowsu-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: ${{ runner.os }}-xen-kowsu-
 
       - name: Prepare Clang r547379
         run: |
@@ -97,16 +97,10 @@ jobs:
           bash scripts/integrate-rksu-legacy.sh
           test -L drivers/kernelsu
           test -f drivers/kernelsu/Kconfig
-          test -f drivers/kernelsu/Makefile
+          test -f drivers/kernelsu/Kbuild
           grep -qF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           grep -qE '^obj-\$\(CONFIG_KSU\)[[:space:]]*\+= kernelsu/' drivers/Makefile
-          # RKSU Legacy hook mode must be selected from the symbols actually
-          # exported by the pinned legacy source, not inferred from Manager branding.
-          echo "KowSU requires KPROBES on this legacy kernel; verify that it is enabled."
-          if grep -qE 'depends on KPROBES|depends on GKI|depends on CONFIG_KPROBES' drivers/kernelsu/Kconfig; then
-            echo "::error::KowSU Kconfig requires KPROBES; this is expected for its hook backend."
-            exit 1
-          fi
+          grep -q 'depends on KPROBES' drivers/kernelsu/Kconfig
           git diff --check
 
       - name: Configure Xen + KowSU + KPROBES + ThinLTO
@@ -117,19 +111,17 @@ jobs:
           KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
           "${KMAKE[@]}" vayu_defconfig
 
-          # Enable root backend only after upstream legacy Kconfig is loaded.
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen-RKSU+1" --disable LOCALVERSION_AUTO \
+            --set-str LOCALVERSION "-Xen-KowSU+1" --disable LOCALVERSION_AUTO \
             --enable KSU --enable KPROBES --enable KRETPROBES \
             --enable LTO --enable LTO_CLANG --enable THINLTO --disable LTO_NONE \
             --enable CC_OPTIMIZE_FOR_PERFORMANCE --disable CC_OPTIMIZE_FOR_SIZE
 
           "${KMAKE[@]}" olddefconfig
 
-          grep -q '^CONFIG_KPROBES=y
-            echo "::error::CONFIG_KSU did not survive olddefconfig; inspect RKSU Kconfig prerequisites"
-            exit 1
-          }
+          grep -q '^CONFIG_KPROBES=y$' out/.config || { echo "::error::KPROBES is required by KowSU"; exit 1; }
+          grep -q '^CONFIG_KSU=y$' out/.config || { echo "::error::CONFIG_KSU did not survive olddefconfig"; exit 1; }
+          grep -q '^CONFIG_EXT4_FS=y$' out/.config || { echo "::error::KowSU requires EXT4_FS"; exit 1; }
           grep -q '^CONFIG_LTO=y$' out/.config
           grep -q '^CONFIG_LTO_CLANG=y$' out/.config
           grep -q '^CONFIG_THINLTO=y$' out/.config
@@ -157,101 +149,7 @@ jobs:
         run: |
           mkdir -p artifacts
           cp build.log artifacts/ 2>/dev/null || true
-          cp xen-rksu.config artifacts/ 2>/dev/null || true
-          cp out/.config artifacts/kernel.config 2>/dev/null || true
-          cp out/arch/arm64/boot/Image artifacts/ 2>/dev/null || true
-          cp out/include/config/kernel.release artifacts/kernel-release.txt 2>/dev/null || true
-          git rev-parse HEAD > artifacts/xen-commit.txt 2>/dev/null || true
-          git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt 2>/dev/null || true
-          clang --version > artifacts/clang-version.txt 2>&1 || true
-
-      - name: Upload KowSU build artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Xen-Kernel-KowSU
-          path: artifacts/
-          if-no-files-found: warn
-          retention-days: 7
- out/.config || { echo '::error::KPROBES is required by KowSU'; exit 1; }\n          grep -q '^CONFIG_KSU=y
-            echo "::error::CONFIG_KSU did not survive olddefconfig; inspect RKSU Kconfig prerequisites"
-            exit 1
-          }
-          grep -q '^CONFIG_LTO=y$' out/.config
-          grep -q '^CONFIG_LTO_CLANG=y$' out/.config
-          grep -q '^CONFIG_THINLTO=y$' out/.config
-          ! grep -q '^CONFIG_LTO_NONE=y$' out/.config
-          cp out/.config xen-kowsu.config
-          "${KMAKE[@]}" kernelrelease
-
-      - name: Build kernel Image
-        run: |
-          set -uo pipefail
-          export PATH="$HOME/clang/bin:$PATH"
-          make -j"$(nproc)" O=out ARCH=arm64 SUBARCH=arm64 \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++ \
-            HOSTAR=llvm-ar HOSTLD=ld.lld LLVM=1 LLVM_IAS=1 CC="ccache clang" Image 2>&1 | tee build.log
-          status=${PIPESTATUS[0]}
-          test "$status" -eq 0
-          test -s out/arch/arm64/boot/Image
-          cat out/include/config/kernel.release
-
-      - name: Collect artifacts
-        if: always()
-        run: |
-          mkdir -p artifacts
-          cp build.log artifacts/ 2>/dev/null || true
-          cp xen-rksu.config artifacts/ 2>/dev/null || true
-          cp out/.config artifacts/kernel.config 2>/dev/null || true
-          cp out/arch/arm64/boot/Image artifacts/ 2>/dev/null || true
-          cp out/include/config/kernel.release artifacts/kernel-release.txt 2>/dev/null || true
-          git rev-parse HEAD > artifacts/xen-commit.txt 2>/dev/null || true
-          git -C KernelSU rev-parse HEAD > artifacts/kowsu-commit.txt 2>/dev/null || true
-          clang --version > artifacts/clang-version.txt 2>&1 || true
-
-      - name: Upload KowSU build artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Xen-Kernel-KowSU
-          path: artifacts/
-          if-no-files-found: warn
-          retention-days: 7
- out/.config || {
-            echo "::error::CONFIG_KSU did not survive olddefconfig; inspect RKSU Kconfig prerequisites"
-            exit 1
-          }
-          grep -q '^CONFIG_LTO=y$' out/.config
-          grep -q '^CONFIG_LTO_CLANG=y$' out/.config
-          grep -q '^CONFIG_THINLTO=y$' out/.config
-          ! grep -q '^CONFIG_LTO_NONE=y$' out/.config
-          cp out/.config xen-kowsu.config
-          "${KMAKE[@]}" kernelrelease
-
-      - name: Build kernel Image
-        run: |
-          set -uo pipefail
-          export PATH="$HOME/clang/bin:$PATH"
-          make -j"$(nproc)" O=out ARCH=arm64 SUBARCH=arm64 \
-            CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++ \
-            HOSTAR=llvm-ar HOSTLD=ld.lld LLVM=1 LLVM_IAS=1 CC="ccache clang" Image 2>&1 | tee build.log
-          status=${PIPESTATUS[0]}
-          test "$status" -eq 0
-          test -s out/arch/arm64/boot/Image
-          cat out/include/config/kernel.release
-
-      - name: Collect artifacts
-        if: always()
-        run: |
-          mkdir -p artifacts
-          cp build.log artifacts/ 2>/dev/null || true
-          cp xen-rksu.config artifacts/ 2>/dev/null || true
+          cp xen-kowsu.config artifacts/ 2>/dev/null || true
           cp out/.config artifacts/kernel.config 2>/dev/null || true
           cp out/arch/arm64/boot/Image artifacts/ 2>/dev/null || true
           cp out/include/config/kernel.release artifacts/kernel-release.txt 2>/dev/null || true
