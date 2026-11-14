@@ -94,7 +94,7 @@ jobs:
       - name: Integrate KowSU upstream (pinned commit)
         run: |
           set -euo pipefail
-          bash scripts/integrate-rksu-legacy.sh
+          bash scripts/integrate-kowsu.sh
           test -L drivers/kernelsu
           test -f drivers/kernelsu/Kconfig
           test -f drivers/kernelsu/Kbuild
