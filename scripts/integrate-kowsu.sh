@@ -41,6 +41,72 @@ p.write_text(s)
 PY
 
 
+# Linux 4.14 task_work/fsnotify compatibility for KowSU package observer.
+python3 - <<'PY'
+from pathlib import Path
+p = Path("KernelSU/kernel/manager/pkg_observer.c")
+s = p.read_text()
+
+# Linux 4.14 task_work_add() takes a boolean notify_resume argument.
+s = s.replace("#include <linux/version.h>", """#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0)
+#ifndef TWA_RESUME
+#define TWA_RESUME true
+#endif
+#endif""", 1)
+
+# Linux 4.14 fsnotify_ops uses handle_event(group, inode, marks, mask,
+# data, data_type, filename, cookie, iter_info), not handle_inode_event().
+old_sig = """static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask, struct inode *inode, struct inode *dir,
+                                  const struct qstr *file_name, u32 cookie)
+{"""
+new_sig = """#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 1, 0)
+static int ksu_handle_inode_event(struct fsnotify_group *group, struct inode *inode,
+                                  struct fsnotify_mark *inode_mark,
+                                  struct fsnotify_mark *vfsmount_mark, u32 mask,
+                                  const void *data, int data_type,
+                                  const unsigned char *file_name, u32 cookie,
+                                  struct fsnotify_iter_info *iter_info)
+#else
+static int ksu_handle_inode_event(struct fsnotify_mark *mark, u32 mask, struct inode *inode, struct inode *dir,
+                                  const struct qstr *file_name, u32 cookie)
+#endif
+{"""
+if old_sig not in s:
+    raise SystemExit("KowSU observer callback signature anchor not found")
+s = s.replace(old_sig, new_sig, 1)
+
+# Old fsnotify passes a filename byte string; newer API passes qstr.
+s = s.replace("""    if (!file_name)
+        return 0;
+    if (mask & FS_ISDIR)
+        return 0;
+    if (file_name->len == 13 && !memcmp(file_name->name, "packages.list", 13)) {""", """#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 1, 0)
+    if (!file_name)
+        return 0;
+    if (mask & FS_ISDIR)
+        return 0;
+    if (strlen(file_name) == 13 && !memcmp(file_name, "packages.list", 13)) {
+#else
+    if (!file_name)
+        return 0;
+    if (mask & FS_ISDIR)
+        return 0;
+    if (file_name->len == 13 && !memcmp(file_name->name, "packages.list", 13)) {
+#endif""", 1)
+
+s = s.replace("""static const struct fsnotify_ops ksu_ops = {
+    .handle_inode_event = ksu_handle_inode_event,
+};""", """static const struct fsnotify_ops ksu_ops = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 1, 0)
+    .handle_event = ksu_handle_inode_event,
+#else
+    .handle_inode_event = ksu_handle_inode_event,
+#endif
+};""", 1)
+p.write_text(s)
+PY
+
 # Linux 4.14 file_operations compatibility: guard members absent from old kernels.
 python3 - <<'PY'
 from pathlib import Path
