@@ -8,6 +8,18 @@ git -C KernelSU fetch --depth=1 origin "$KOWSU_REF"
 git -C KernelSU checkout --detach FETCH_HEAD
 echo "KowSU commit: $(git -C KernelSU rev-parse HEAD)"
 
+# Linux 4.14 mount UAPI compatibility: use exported linux/mount.h instead of absent uapi header.
+python3 - <<'PY'
+from pathlib import Path
+p = Path("KernelSU/kernel/infra/su_mount_ns.c")
+s = p.read_text()
+old = "#include <uapi/linux/mount.h>"
+new = "#include <linux/mount.h>"
+if old not in s:
+    raise SystemExit("KowSU mount header include anchor not found")
+p.write_text(s.replace(old, new, 1))
+PY
+
 # Linux 4.14 seccomp compatibility: native syscall count macro is named NR_syscalls.
 python3 - <<'PY'
 from pathlib import Path
