@@ -185,7 +185,7 @@ jobs:
           scripts/config --file out/.config --enable OPLUS_FEATURES
 
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen+3" \
+            --set-str LOCALVERSION "-Xen+4•oplus" \
             --disable LOCALVERSION_AUTO \
             --enable LTO \
             --enable LTO_CLANG \
