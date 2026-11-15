@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-EXPECTED_KSUN_SHA = "465490a26667ba4cf00b3be975a7e28e53978829"
+EXPECTED_KSUN_SHA = "7d8c81cc67552ab179702b66b20e811a0d4ef435"
 
 KCONFIG_BLOCK = r'''
 # XEN-SUSFS-KSUN-COMPAT-BEGIN
