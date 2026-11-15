@@ -182,7 +182,7 @@ jobs:
           "${KMAKE[@]}" vayu_defconfig
 
           scripts/config --file out/.config \
-            --set-str LOCALVERSION "-Xen+3" \
+            --set-str LOCALVERSION "-Xen+4" \
             --disable LOCALVERSION_AUTO \
             --enable LTO \
             --enable LTO_CLANG \
