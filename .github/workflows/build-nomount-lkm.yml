@@ -54,17 +54,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "${GITHUB_WORKSPACE}/toolchain"
+          mkdir -p toolchain
           git clone --depth=1 --single-branch --branch 15.0 \
-            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
-            "${GITHUB_WORKSPACE}/toolchain/clang"
-          rm -rf "${GITHUB_WORKSPACE}/toolchain/clang/.git"
-          echo "${LLVM_DIR}" >> "${GITHUB_PATH}"
-          echo "${LLVM_EXTRA_DIR}" >> "${GITHUB_PATH}"
-          if [ ! -x "${LLVM_DIR}/ld.lld" ] && [ -x "${LLVM_EXTRA_DIR}/ld.lld" ]; then ln -sf "${LLVM_EXTRA_DIR}/ld.lld" "${LLVM_DIR}/ld.lld"; fi
-          if [ ! -x "${LLVM_DIR}/clang" ] && [ -x "${LLVM_EXTRA_DIR}/clang" ]; then ln -sf "${LLVM_EXTRA_DIR}/clang" "${LLVM_DIR}/clang"; fi
-          test -x "${LLVM_DIR}/clang" || { echo "::error::clang missing"; exit 1; }
-          test -x "${LLVM_DIR}/ld.lld" || { echo "::error::ld.lld missing"; find toolchain/clang -maxdepth 4 -name ld.lld -print; exit 1; }
+            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git toolchain/clang
+          rm -rf toolchain/clang/.git
+          echo "Searching LLVM binaries..."
+          find toolchain/clang -maxdepth 5 \( -name clang -o -name ld.lld \) -print
+          CLANG_BIN="$(find toolchain/clang -maxdepth 5 -name clang -type f -o -name clang -type l | head -n1)"
+          LLD_BIN="$(find toolchain/clang -maxdepth 5 -name ld.lld -type f -o -name ld.lld -type l | head -n1)"
+          if [ -z "$CLANG_BIN" ] || [ -z "$LLD_BIN" ]; then
+            echo "::error::clang/ld.lld not found in downloaded crDroid toolchain"
+            exit 1
+          fi
+          LLVM_BIN="$(dirname "$CLANG_BIN")"
+          ln -sf "$LLD_BIN" "$LLVM_BIN/ld.lld" 2>/dev/null || true
+          echo "$LLVM_BIN" >> "$GITHUB_PATH"
+          export PATH="$LLVM_BIN:$PATH"
           clang --version
           ld.lld --version
 
