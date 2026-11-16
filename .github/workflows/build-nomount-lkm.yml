@@ -30,6 +30,7 @@ jobs:
       NOMOUNT_REF: ${{ inputs.nomount_ref }}
       OUT_DIR: ${{ github.workspace }}/out
       LLVM_DIR: ${{ github.workspace }}/toolchain/clang/bin
+      LLVM_EXTRA_DIR: ${{ github.workspace }}/toolchain/clang/llvm/bin
 
     steps:
       - name: Checkout Xen-Kernel KSUN source
@@ -59,6 +60,11 @@ jobs:
             "${GITHUB_WORKSPACE}/toolchain/clang"
           rm -rf "${GITHUB_WORKSPACE}/toolchain/clang/.git"
           echo "${LLVM_DIR}" >> "${GITHUB_PATH}"
+          echo "${LLVM_EXTRA_DIR}" >> "${GITHUB_PATH}"
+          if [ ! -x "${LLVM_DIR}/ld.lld" ] && [ -x "${LLVM_EXTRA_DIR}/ld.lld" ]; then ln -sf "${LLVM_EXTRA_DIR}/ld.lld" "${LLVM_DIR}/ld.lld"; fi
+          if [ ! -x "${LLVM_DIR}/clang" ] && [ -x "${LLVM_EXTRA_DIR}/clang" ]; then ln -sf "${LLVM_EXTRA_DIR}/clang" "${LLVM_DIR}/clang"; fi
+          test -x "${LLVM_DIR}/clang" || { echo "::error::clang missing"; exit 1; }
+          test -x "${LLVM_DIR}/ld.lld" || { echo "::error::ld.lld missing"; find toolchain/clang -maxdepth 4 -name ld.lld -print; exit 1; }
           clang --version
           ld.lld --version
 
