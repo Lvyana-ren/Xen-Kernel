@@ -1,0 +1,148 @@
+name: Xen-Kernel - Build NoMount LKM (KSUN)
+
+on:
+  workflow_dispatch:
+    inputs:
+      nomount_ref:
+        description: "NoMount branch, tag, or commit to build"
+        required: true
+        default: "master"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xen-nomount-lkm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-nomount:
+    name: Build nomount.ko only
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      KBUILD_BUILD_USER: Lvyana
+      KBUILD_BUILD_HOST: Xen-Kernel
+      NOMOUNT_REPO: https://github.com/maxsteeel/nomount
+      NOMOUNT_REF: ${{ inputs.nomount_ref }}
+      OUT_DIR: ${{ github.workspace }}/out
+      LLVM_DIR: ${{ github.workspace }}/toolchain/clang/bin
+
+    steps:
+      - name: Checkout Xen-Kernel KSUN source
+        uses: actions/checkout@v4
+        with:
+          ref: NoMount-KSUN
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates ccache flex git libelf-dev \
+            libssl-dev make python3 rsync gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu \
+            binutils-arm-linux-gnueabi libncurses-dev lz4 zip wget xz-utils file
+
+      - name: Prepare Clang toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${GITHUB_WORKSPACE}/toolchain"
+          git clone --depth=1 --single-branch --branch 15.0 \
+            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
+            "${GITHUB_WORKSPACE}/toolchain/clang"
+          rm -rf "${GITHUB_WORKSPACE}/toolchain/clang/.git"
+          echo "${LLVM_DIR}" >> "${GITHUB_PATH}"
+          clang --version
+          ld.lld --version
+
+      - name: Verify target kernel configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s arch/arm64/configs/vayu_defconfig
+          grep -q '^CONFIG_MODULES=y$' arch/arm64/configs/vayu_defconfig
+          grep -q '^CONFIG_MODVERSIONS=y$' arch/arm64/configs/vayu_defconfig
+          grep -q '^CONFIG_KEYS=y$' arch/arm64/configs/vayu_defconfig
+          grep -q '^CONFIG_KSU=y$' arch/arm64/configs/vayu_defconfig
+          echo "Target: Xen-Kernel KSUN / arm64 / Linux $(make kernelversion)"
+
+      - name: Fetch NoMount source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "${NOMOUNT_REPO}" NoMount
+          git -C NoMount fetch --tags origin
+          git -C NoMount checkout --detach "${NOMOUNT_REF}"
+          echo "NoMount commit: $(git -C NoMount rev-parse HEAD)"
+          test -s NoMount/kernel/src/Makefile
+          test -s NoMount/kernel/src/Kconfig
+
+      - name: Stage NoMount into temporary kernel tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p fs/nomount
+          cp -a NoMount/kernel/src/. fs/nomount/
+          grep -q 'CONFIG_NOMOUNT' fs/nomount/Kconfig
+          grep -q 'nomount' fs/nomount/Makefile
+          grep -q 'source "fs/nomount/Kconfig"' fs/Kconfig || printf '\nsource "fs/nomount/Kconfig"\n' >> fs/Kconfig
+          grep -q 'obj-$(CONFIG_NOMOUNT) += nomount/' fs/Makefile || printf '\nobj-$(CONFIG_NOMOUNT) += nomount/\n' >> fs/Makefile
+
+      - name: Configure and prepare KSUN
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="${LLVM_DIR}:${PATH}"
+          LLVM_VARS=(CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1)
+          KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
+          "${KMAKE[@]}" vayu_defconfig
+          scripts/config --file out/.config --enable MODULES --enable MODVERSIONS --enable KEYS --enable KSU --enable NOMOUNT
+          "${KMAKE[@]}" olddefconfig
+          "${KMAKE[@]}" modules_prepare
+          if [ ! -s out/Module.symvers ]; then
+            echo "::error::out/Module.symvers is missing. MODVERSIONS needs symbol CRCs from the exact matching Xen kernel build."
+            echo "::error::Supply the matching Module.symvers artifact; this workflow intentionally does not build Image/boot.img."
+            exit 1
+          fi
+          cp out/.config artifacts-kernel.config
+          cp out/Module.symvers artifacts-Module.symvers
+
+      - name: Compile NoMount LKM only
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="${LLVM_DIR}:${PATH}"
+          LLVM_VARS=(CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1)
+          make ARCH=arm64 O=out "${LLVM_VARS[@]}" CONFIG_NOMOUNT=m -C "${GITHUB_WORKSPACE}/out" M="${GITHUB_WORKSPACE}/fs/nomount" modules 2>&1 | tee nomount-build.log
+          test -s fs/nomount/nomount.ko
+          file fs/nomount/nomount.ko
+          llvm-readelf -h fs/nomount/nomount.ko
+
+      - name: Collect artifacts
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          [ ! -s fs/nomount/nomount.ko ] || cp fs/nomount/nomount.ko artifacts/
+          [ ! -f nomount-build.log ] || cp nomount-build.log artifacts/
+          [ ! -f artifacts-kernel.config ] || cp artifacts-kernel.config artifacts/kernel.config
+          [ ! -f artifacts-Module.symvers ] || cp artifacts-Module.symvers artifacts/Module.symvers
+          git rev-parse HEAD > artifacts/xen-source-commit.txt
+          git -C NoMount rev-parse HEAD > artifacts/nomount-source-commit.txt 2>/dev/null || true
+          printf 'NoMount ref: %s\nTarget branch: NoMount-KSUN\n' "${NOMOUNT_REF}" > artifacts/build-info.txt
+
+      - name: Upload NoMount LKM artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Xen-NoMount-LKM-KSUN
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
