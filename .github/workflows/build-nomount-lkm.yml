@@ -29,7 +29,7 @@ jobs:
       NOMOUNT_REPO: https://github.com/maxsteeel/nomount
       NOMOUNT_REF: ${{ inputs.nomount_ref }}
       OUT_DIR: ${{ github.workspace }}/out
-      LLVM_DIR: ${{ github.workspace }}/toolchain/clang/bin
+      LLVM_DIR: ${{ runner.temp }}/llvm-bin
 
     steps:
       - name: Checkout Xen-Kernel KSUN source
@@ -52,15 +52,19 @@ jobs:
       - name: Prepare Clang toolchain
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p "${GITHUB_WORKSPACE}/toolchain"
-          git clone --depth=1 --single-branch --branch 15.0 \
-            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
-            "${GITHUB_WORKSPACE}/toolchain/clang"
-          rm -rf "${GITHUB_WORKSPACE}/toolchain/clang/.git"
+          set -euxo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends clang-14 lld-14 llvm-14
+          mkdir -p "${LLVM_DIR}"
+          # Ubuntu 22.04 binaries are version-suffixed; map them to Kbuild's expected names.
+          for tool in clang clang++ ld.lld llvm-ar llvm-nm llvm-strip llvm-objcopy llvm-objdump llvm-readelf; do
+            command -v "${tool}-14" >/dev/null || { echo "::error::Missing ${tool}-14"; exit 1; }
+            ln -sf "$(command -v "${tool}-14")" "${LLVM_DIR}/${tool}"
+          done
           echo "${LLVM_DIR}" >> "${GITHUB_PATH}"
+          export PATH="${LLVM_DIR}:${PATH}"
           clang --version
           ld.lld --version
+          llvm-ar --version
 
       - name: Verify target kernel configuration
         shell: bash
@@ -147,7 +151,7 @@ jobs:
 
           cp out/.config artifacts-kernel.config
           cp out/Module.symvers artifacts-Module.symvers
-          echo "Kernel release: $(" ${KMAKE[@]}" --no-print-directory -s kernelrelease)"
+          echo "Kernel release: $(make ARCH=arm64 O=out "${LLVM_VARS[@]}" --no-print-directory -s kernelrelease)"
 
       - name: Compile NoMount LKM only
         shell: bash
@@ -163,10 +167,8 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi-
             LLVM=1 LLVM_IAS=1
           )
-          make ARCH=arm64 O=out "${LLVM_VARS[@]}" \
-            CONFIG_NOMOUNT=m \
-            -C "${GITHUB_WORKSPACE}/out" \
-            M="${GITHUB_WORKSPACE}/fs/nomount" \
+          make -C "${GITHUB_WORKSPACE}" ARCH=arm64 O=out "${LLVM_VARS[@]}" \
+            CONFIG_NOMOUNT=m M="${GITHUB_WORKSPACE}/fs/nomount" \
             modules 2>&1 | tee nomount-build.log
 
           test -s fs/nomount/nomount.ko
