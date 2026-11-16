@@ -48,7 +48,7 @@ jobs:
             bc bison build-essential ca-certificates ccache flex git libelf-dev \
             libssl-dev make python3 rsync gcc-aarch64-linux-gnu \
             gcc-arm-linux-gnueabi binutils-aarch64-linux-gnu \
-            binutils-arm-linux-gnueabi libncurses-dev lz4 zip wget xz-utils file
+            binutils-arm-linux-gnueabi libncurses-dev lz4 zip wget xz-utils file lld
 
       - name: Prepare Clang toolchain
         shell: bash
