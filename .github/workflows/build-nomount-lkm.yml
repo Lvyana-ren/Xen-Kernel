@@ -53,25 +53,16 @@ jobs:
       - name: Prepare Clang toolchain
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p toolchain
-          git clone --depth=1 --single-branch --branch 15.0 \
-            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git toolchain/clang
-          rm -rf toolchain/clang/.git
-          echo "Searching LLVM binaries..."
-          find toolchain/clang -maxdepth 5 \( -name clang -o -name ld.lld \) -print
-          CLANG_BIN="$(find toolchain/clang -maxdepth 5 -name clang -type f -o -name clang -type l | head -n1)"
-          LLD_BIN="$(find toolchain/clang -maxdepth 5 -name ld.lld -type f -o -name ld.lld -type l | head -n1)"
-          if [ -z "$CLANG_BIN" ] || [ -z "$LLD_BIN" ]; then
-            echo "::error::clang/ld.lld not found in downloaded crDroid toolchain"
-            exit 1
-          fi
-          LLVM_BIN="$(dirname "$CLANG_BIN")"
-          ln -sf "$LLD_BIN" "$LLVM_BIN/ld.lld" 2>/dev/null || true
-          echo "$LLVM_BIN" >> "$GITHUB_PATH"
-          export PATH="$LLVM_BIN:$PATH"
+          set -euxo pipefail
+          sudo apt-get install -y clang lld
+          echo "=== system binaries ==="
+          command -v clang
+          command -v ld.lld || true
+          ls -l /usr/bin/ld.lld* /usr/bin/clang* || true
+          # Use Ubuntu's packaged LLVM tools; kernel source does not require the custom crDroid Clang for this LKM step.
+          echo "/usr/bin" >> "$GITHUB_PATH"
           clang --version
-          ld.lld --version
+          ld.lld-14 --version || ld.lld --version
 
       - name: Verify target kernel configuration
         shell: bash
