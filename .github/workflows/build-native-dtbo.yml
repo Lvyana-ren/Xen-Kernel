@@ -1,4 +1,4 @@
-name: Xen-Kernel - Native Vayu DTB/DTBO (OOS Audit)
+name: Xen-Kernel - Native Vayu DTB/DTBO (Oplus)
 
 on:
   workflow_dispatch:
@@ -18,12 +18,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: xen-native-dt-${{ github.ref }}
+  group: xen-oplus-native-dt-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build-device-tree:
-    name: Build native Xen vayu device tree
+    name: Build native Oplus vayu device tree
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     env:
@@ -36,7 +36,7 @@ jobs:
       - name: Checkout selected source revision
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.ref }}
+          ref: Oplus
           fetch-depth: 1
           lfs: true
 
@@ -44,6 +44,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/Oplus" ]]; then
+            echo "::error::This workflow must be dispatched from refs/heads/Oplus."
+            exit 1
+          fi
           actual="$(git rev-parse HEAD)"
           echo "Selected ref: $GITHUB_REF"
           echo "Expected:     $GITHUB_SHA"
@@ -103,7 +107,7 @@ jobs:
           grep -q 'CONFIG_BUILD_ARM64_DT_OVERLAY=y' arch/arm64/configs/vayu_oxygenos_defconfig
           make kernelversion
 
-      - name: Configure OOS device-tree build
+      - name: Configure Oplus device-tree build
         shell: bash
         run: |
           set -euo pipefail
@@ -182,7 +186,7 @@ jobs:
           git rev-parse HEAD > artifacts/source-commit.txt
           git log -1 --oneline > artifacts/source-revision.txt
           {
-            echo "Native Xen vayu DTB/DTBO audit build"
+            echo "Native Xen vayu DTB/DTBO build (Oplus)"
             echo "Ref: $GITHUB_REF"
             echo "Commit: $(git rev-parse HEAD)"
             echo "Defconfig: vayu_oxygenos_defconfig"
@@ -196,7 +200,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Xen-OOS-Native-DTB-DTBO-${{ github.sha }}
+          name: Xen-Oplus-Native-DTB-DTBO-${{ github.sha }}
           path: artifacts/
           if-no-files-found: warn
           retention-days: 14
