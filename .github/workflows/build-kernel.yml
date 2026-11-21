@@ -28,7 +28,7 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          # Build the exact branch/ref selected in workflow_dispatch.
+          # Always build the Oplus branch; dispatching another ref is rejected below.
           ref: Oplus
           fetch-depth: 1
           lfs: true
