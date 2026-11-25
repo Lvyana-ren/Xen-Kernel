@@ -1578,7 +1578,8 @@ And public attribution of xiaomi platforms(like J20S and so and)
 };
 
 &mdss_mdp {
-       clock-rate = <0 0 0 0 345000000 19200000 300000000 19200000>;
+	connectors = <&sde_rscc &sde_wb &sde_dsi &sde_dsi1>;
+	clock-rate = <0 0 0 0 345000000 19200000 300000000 19200000>;
 };
 
 
