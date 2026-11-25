@@ -2,6 +2,12 @@ name: Xen-Kernel - HyperOS Compatibility Build
 
 on:
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Git branch, tag, or commit to build"
+        required: true
+        default: "HyperOS"
+        type: string
   push:
     branches:
       - HyperOS
@@ -31,7 +37,7 @@ jobs:
       - name: Checkout Xen-Kernel source
         uses: actions/checkout@v4
         with:
-          ref: "${{ github.ref_name }}"
+          ref: "${{ inputs.source_ref || github.ref_name }}"
           fetch-depth: 1
           lfs: true
 
@@ -286,6 +292,101 @@ jobs:
           echo "===== ZRAM source default ====="
           grep -n 'default_compressor' drivers/block/zram/zram_drv.c
 
+      - name: Compile and audit vayu DTB and DTBO
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/clang/bin:$PATH"
+
+          LLVM_VARS=(
+            CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm STRIP=llvm-strip
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf
+            HOSTCC=clang HOSTCXX=clang++ HOSTAR=llvm-ar HOSTLD=ld.lld
+            CLANG_TRIPLE=aarch64-linux-gnu-
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+            LLVM=1 LLVM_IAS=1 DTC_EXT=dtc
+          )
+          KMAKE=(make ARCH=arm64 O=out "${LLVM_VARS[@]}")
+
+          echo "===== Effective device-tree configuration ====="
+          grep -E '^(CONFIG_(ARCH_SM8150|MACH_XIAOMI|MACH_XIAOMI_SM8150|MACH_XIAOMI_VAYU|BUILD_ARM64_DT_OVERLAY))=' out/.config
+
+          for option in CONFIG_ARCH_SM8150 CONFIG_MACH_XIAOMI CONFIG_MACH_XIAOMI_SM8150 CONFIG_MACH_XIAOMI_VAYU CONFIG_BUILD_ARM64_DT_OVERLAY; do
+            if ! grep -q "^$option=y$" out/.config; then
+              echo "::error::$option must be enabled to build the vayu device tree."
+              exit 1
+            fi
+          done
+
+          echo "===== Compile all enabled DTBs and DTBOs ====="
+          "${KMAKE[@]}" dtbs
+
+          DT_DIR="out/arch/arm64/boot/dts/qcom"
+          for file in sm8150-xiaomi.dtb sm8150-v2-xiaomi.dtb vayu-sm8150-overlay.dtbo; do
+            if [ ! -s "$DT_DIR/$file" ]; then
+              echo "::error::Required vayu device-tree output missing: $DT_DIR/$file"
+              find out/arch/arm64/boot/dts -type f \( -name '*.dtb' -o -name '*.dtbo' \) -print | sort || true
+              exit 1
+            fi
+          done
+
+          echo "===== Package DTB and DTBO images ====="
+          "${KMAKE[@]}" dtb.img dtbo.img
+          test -s out/arch/arm64/boot/dtb.img
+          test -s out/arch/arm64/boot/dtbo.img
+
+          mkdir -p artifacts/device-tree
+          cp out/arch/arm64/boot/dtb.img artifacts/device-tree/
+          cp out/arch/arm64/boot/dtbo.img artifacts/device-tree/
+          cp "$DT_DIR/sm8150-xiaomi.dtb" artifacts/device-tree/
+          cp "$DT_DIR/sm8150-v2-xiaomi.dtb" artifacts/device-tree/
+          cp "$DT_DIR/vayu-sm8150-overlay.dtbo" artifacts/device-tree/
+
+          echo "===== Decompile exact compiled vayu DTB/DTBO ====="
+          dtc -I dtb -O dts -o artifacts/device-tree/sm8150-xiaomi.dts "$DT_DIR/sm8150-xiaomi.dtb"
+          dtc -I dtb -O dts -o artifacts/device-tree/sm8150-v2-xiaomi.dts "$DT_DIR/sm8150-v2-xiaomi.dtb"
+          dtc -I dtb -O dts -o artifacts/device-tree/vayu-sm8150-overlay.dts "$DT_DIR/vayu-sm8150-overlay.dtbo"
+
+          BASE_DTS="artifacts/device-tree/sm8150-xiaomi.dts"
+          VAYU_DTS="artifacts/device-tree/vayu-sm8150-overlay.dts"
+          REPORT="artifacts/device-tree/device-tree-audit.txt"
+          {
+            echo "Source commit: $(git rev-parse HEAD)"
+            echo "Kernel config: out/.config"
+            echo
+            echo "[Base DTB: CPU/GPU and SoC OPP evidence]"
+            grep -nE 'operating-points-v2|opp-hz|gpu-opp-table|qcom,kgsl-3d0|cpu-opp|cpufreq' "$BASE_DTS" | head -n 160 || true
+            echo
+            echo "[Vayu DTBO: display, charging, battery and thermal evidence]"
+            grep -nE 'connectors|qcom,fcc-max-ua|qcom,usb-icl-ua|qcom,thermal-|qcom,battery-data|step-charging|sw-jeita|bq2597|ln8000|usbpd' "$VAYU_DTS" | head -n 240 || true
+          } > "$REPORT"
+
+          # Fail if the compiled GPU OPP table or KGSL node is absent.
+          grep -q 'gpu-opp-table' "$BASE_DTS" || { echo "::error::GPU OPP table missing from compiled base DTB."; exit 1; }
+          grep -q 'qcom,kgsl-3d0' "$BASE_DTS" || { echo "::error::KGSL GPU node missing from compiled base DTB."; exit 1; }
+          grep -q 'opp-hz' "$BASE_DTS" || { echo "::error::No OPP frequency entries found in compiled base DTB."; exit 1; }
+
+          # These properties are authored in the vayu overlay and must survive preprocessing/DTBO compilation.
+          for property in connectors qcom,fcc-max-ua qcom,usb-icl-ua qcom,thermal-mitigation qcom,battery-data qcom,step-charging-enable qcom,sw-jeita-enable; do
+            if ! grep -q "$property" "$VAYU_DTS"; then
+              echo "::error::Expected vayu DTBO property missing after compilation: $property"
+              exit 1
+            fi
+          done
+
+          # Do not silently claim CPU OPP is encoded in DT: record the actual compiled evidence.
+          if grep -Eqi 'cpu[^[:space:]]*(opp|freq)|opp[^[:space:]]*cpu|qcom,cpufreq|operating-points-v2' "$BASE_DTS"; then
+            echo "CPU/OPP-related entries detected; inspect audit report." >> "$REPORT"
+          else
+            echo "NOTICE: No CPU-specific OPP/cpufreq table identified in this compiled base DTB. CPU frequency limits may be supplied by cpufreq driver/firmware rather than DT." >> "$REPORT"
+          fi
+
+          echo "===== Device-tree artifact sizes ====="
+          ls -lh out/arch/arm64/boot/dtb.img out/arch/arm64/boot/dtbo.img "$DT_DIR/sm8150-xiaomi.dtb" "$DT_DIR/vayu-sm8150-overlay.dtbo"
+          cat "$REPORT"
+
       - name: Collect diagnostics and artifacts
         if: always()
         shell: bash
@@ -307,6 +408,10 @@ jobs:
           fi
           if [[ -s out/arch/arm64/boot/dtb.img ]]; then
             cp out/arch/arm64/boot/dtb.img artifacts/
+          fi
+          if [[ -d artifacts/device-tree ]]; then
+            echo "===== Device-tree artifacts already staged ====="
+            find artifacts/device-tree -maxdepth 1 -type f -exec ls -lh '{}' \\;
           fi
           if [[ -f out/include/config/kernel.release ]]; then
             cp out/include/config/kernel.release artifacts/kernel-release.txt
