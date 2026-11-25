@@ -377,7 +377,7 @@ jobs:
           done
 
           # Do not silently claim CPU OPP is encoded in DT: record the actual compiled evidence.
-          if grep -Eqi 'cpu[^[:space:]]*(opp|freq)|opp[^[:space:]]*cpu|qcom,cpufreq|operating-points-v2' "$BASE_DTS"; then
+          if grep -Eqi 'cpu[^[:space:]]*(opp|freq)|opp[^[:space:]]*cpu|qcom,cpufreq' "$BASE_DTS"; then
             echo "CPU/OPP-related entries detected; inspect audit report." >> "$REPORT"
           else
             echo "NOTICE: No CPU-specific OPP/cpufreq table identified in this compiled base DTB. CPU frequency limits may be supplied by cpufreq driver/firmware rather than DT." >> "$REPORT"
@@ -411,7 +411,7 @@ jobs:
           fi
           if [[ -d artifacts/device-tree ]]; then
             echo "===== Device-tree artifacts already staged ====="
-            find artifacts/device-tree -maxdepth 1 -type f -exec ls -lh '{}' \\;
+            ls -lh artifacts/device-tree || true
           fi
           if [[ -f out/include/config/kernel.release ]]; then
             cp out/include/config/kernel.release artifacts/kernel-release.txt
