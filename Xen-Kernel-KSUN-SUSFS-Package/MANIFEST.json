@@ -8,7 +8,9 @@
     "repository": "Lvyana-ren/KernelSU-Next",
     "commit": "7d8c81cc67552ab179702b66b20e811a0d4ef435",
     "package_path": "KernelSU-Next/kernel",
-    "build_mapping": "drivers/kernelsu"
+    "build_mapping": "drivers/kernelsu",
+    "symlink": "kernel/include/uapi -> ../../uapi",
+    "uapi_path": "uapi/"
   },
   "susfs": {
     "version": "v2.3.0",
@@ -18,5 +20,12 @@
     "kernel-overlay contains source snapshots from Xen-Kernel KSUN",
     "KernelSU-Next/kernel is the complete kernel source subtree at the pinned commit",
     "Use diffs/merges when porting into a different kernel base; do not blindly overwrite VFS files"
-  ]
+  ],
+  "package_counts": {
+    "total_files": 172,
+    "kernel_su_kernel_regular_files": 144,
+    "kernel_su_uapi_headers": 6,
+    "kernel_su_symlinks": 1,
+    "xen_kernel_overlay_files": 19
+  }
 }
