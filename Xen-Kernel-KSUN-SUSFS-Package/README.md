@@ -22,3 +22,13 @@ This directory is a source-layout package assembled from two pinned sources.
 
 ## Integrity
 A source manifest is provided alongside this README. File SHA-1 values are Git blob object IDs returned by GitHub for the original source files.
+
+## Verified package contents
+- 144 regular files from `KernelSU-Next/kernel/` at the pinned commit.
+- The original `kernel/include/uapi` symbolic link is preserved and points to `../../uapi`.
+- 6 UAPI headers are included under `KernelSU-Next/uapi/` so the symlink resolves after extraction.
+- 19 Xen-Kernel overlay/source files are included, including the VFS files and all script targets used by the manual-hook workflow.
+- The package contains 172 files total, including this README and the manifest.
+
+## Applying the package layout
+Extract the package directory. Copy the contents of `kernel-overlay/` into the root of the matching Xen kernel source tree, preserving relative paths. Place `KernelSU-Next/` at the kernel source root. The build workflow then maps `KernelSU-Next/kernel` to `drivers/kernelsu` (a symlink), and ensures `drivers/Kconfig` sources `drivers/kernelsu/Kconfig`.
