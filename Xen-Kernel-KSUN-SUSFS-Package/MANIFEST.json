@@ -1,0 +1,22 @@
+{
+  "package": "Xen-Kernel-KSUN-SUSFS-Package",
+  "xen_kernel": {
+    "repository": "Lvyana-ren/Xen-Kernel",
+    "ref": "KSUN"
+  },
+  "kernelsu_next": {
+    "repository": "Lvyana-ren/KernelSU-Next",
+    "commit": "7d8c81cc67552ab179702b66b20e811a0d4ef435",
+    "package_path": "KernelSU-Next/kernel",
+    "build_mapping": "drivers/kernelsu"
+  },
+  "susfs": {
+    "version": "v2.3.0",
+    "variant": "NON-GKI"
+  },
+  "notes": [
+    "kernel-overlay contains source snapshots from Xen-Kernel KSUN",
+    "KernelSU-Next/kernel is the complete kernel source subtree at the pinned commit",
+    "Use diffs/merges when porting into a different kernel base; do not blindly overwrite VFS files"
+  ]
+}
